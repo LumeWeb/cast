@@ -1,0 +1,11 @@
+parameters:
+    level: 8
+    scanFiles:
+        - vendor/php-stubs/wordpress-stubs/wordpress-stubs.php
+    paths:
+        - src
+        - tests
+        - cast.php
+    bootstrapFiles:
+        - tests/bootstrap.php
+    treatPhpDocTypesAsCertain: false
