@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# Minimal explicit token scope: checkout needs repository read; the log-artifact
+# upload needs the Actions API write. Declaring it keeps the workflow working
+# even under an org/repo default of read-only workflow permissions.
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Only set for local root environments; CI runs as a normal user and does NOT
+  # rely on this flag as a hidden workaround.
+  # COMPOSER_ALLOW_SUPERUSER: "1"
+  WP_DB_NAME: cast_test
+  WP_DB_USER: cast_test
+  WP_DB_PASSWORD: cast_test
+  WP_DB_HOST: 127.0.0.1:3307
+
+jobs:
+  lint-static-unit:
+    name: PHP ${{ matrix.php }} — lint/static/unit
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP (with safe Composer cache)
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: composer:v2
+          coverage: none
+          cache: composer
+
+      - name: Validate composer.json
+        run: composer validate --no-check-publish --strict
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress --no-scripts
+
+      - name: Lint PHP (syntax)
+        run: composer lint
+
+      - name: Code style (PHPCS)
+        run: composer style
+
+      - name: Static analysis (PHPStan)
+        run: composer analyse
+
+      - name: Unit tests (PHPUnit)
+        run: composer test
+
+  assets-js:
+    name: Node — assets/js
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run dependency-free JS tests
+        run: composer test:js
+
+  integration:
+    name: PHP 8.3 — integration (MariaDB)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.3 (with safe Composer cache)
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+          coverage: none
+          cache: composer
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress --no-scripts
+
+      # The composer require-dev provides the pinned WordPress 7.1 core, which
+      # wordpress-core-installer relocates to var/wordpress. Point
+      # bin/install-wp-tests.sh at it so it skips re-downloading core.
+      - name: Start test MariaDB (same compose config as local)
+        run: docker compose -f docker-compose.integration.yml up -d --wait
+
+      - name: Install pinned WordPress 7.1 test suite
+        env:
+          WP_CORE_DIR: ${{ github.workspace }}/var/wordpress
+        run: |
+          bash bin/install-wp-tests.sh \
+            "$WP_DB_NAME" "$WP_DB_USER" "$WP_DB_PASSWORD" "$WP_DB_HOST" 7.1 true
+
+      - name: Run integration tests (PHPUnit)
+        env:
+          WP_TESTS_DIR: /tmp/wordpress-tests-lib
+          WP_CORE_DIR: ${{ github.workspace }}/var/wordpress
+        run: composer test:integration
+
+      - name: Capture database/container logs on failure
+        if: always()
+        run: |
+          mkdir -p /tmp/cast-ci-logs
+          docker compose -f docker-compose.integration.yml logs --no-color > /tmp/cast-ci-logs/mariadb.log || true
+          echo "--- misc ---" > /tmp/cast-ci-logs/container-list.txt
+          docker ps -a >> /tmp/cast-ci-logs/container-list.txt || true
+
+      - name: Upload CI logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cast-integration-logs-${{ github.run_id }}
+          path: /tmp/cast-ci-logs/
+          if-no-files-found: ignore
