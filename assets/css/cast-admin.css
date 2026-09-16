@@ -1,0 +1,522 @@
+/**
+ * Cast Getting Started wizard — dedicated admin styles.
+ *
+ * Loaded on the dashboard (wp-admin/index.php) and the workspace wizard screen
+ * (`toplevel_page_workspace-getting-started`, see OnboardingAdminSubscriber::
+ * registerAssets). Builds a centered, WordPress-native wizard shell on top of
+ * the WP admin base: numeric horizontal progress tracker, header, content card,
+ * aligned builder summary, full-width install action and grouped secondary
+ * actions. Colors/typography/buttons and design tokens come from WP admin
+ * (`wp-base-styles`: --wp-admin-theme-color, --wp-admin-theme-color-darker-10,
+ * --wp-admin-border-width-focus); this sheet adds only the wizard layout,
+ * focus-visible keying and reduced-motion support. No brand palette is used.
+ */
+
+:root {
+	--cast-max-width: 640px;
+}
+
+/* ---------------------------- shell ---------------------------- */
+
+/* The shell element also carries WordPress's `.wrap` class (the standard admin
+   page wrapper, so core admin pages/notice CSS keep targeting it). Core's
+   common.css sets `.wrap { margin: 10px 20px 0 2px }` — an asymmetric,
+   LEFT-aligned margin at specificity (0,1,0). A plain `.cast-wizard-wrap`
+   selector would tie that specificity, so on a warm cache (common.css loaded,
+   cast-admin.css not yet) the shell could paint left and then jump centered
+   when this sheet lands. `.wrap.cast-wizard-wrap` (specificity 0,2,0) always
+   wins the tie, keeping the centered shell as both the first paint and the
+   final layout on the wizard page. */
+.wrap.cast-wizard-wrap {
+	max-width: var(--cast-max-width);
+	margin: 0 auto;
+	padding: 16px 0 40px;
+	box-sizing: border-box;
+}
+
+.cast-wizard-wrap *,
+.cast-wizard-wrap *::before,
+.cast-wizard-wrap *::after {
+	box-sizing: border-box;
+}
+
+/* ---------------------- branded header ------------------------ */
+
+.cast-wizard-header {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	padding: 8px 4px 20px;
+}
+
+.cast-wizard-mark {
+	width: 40px;
+	height: 40px;
+	font-size: 22px;
+	line-height: 40px;
+	text-align: center;
+	color: #ffffff;
+	background: var(--wp-admin-theme-color, #2271b1);
+	border-radius: 9px;
+}
+
+.cast-wizard-heading h1 {
+	margin: 0 0 4px;
+	padding: 0;
+	font-size: 23px;
+	line-height: 1.3;
+}
+
+.cast-wizard-subtitle {
+	margin: 0;
+	color: #50575e;
+	font-size: 13px;
+	line-height: 1.5;
+}
+
+/* --------------------- progress tracker ----------------------- */
+
+.cast-progress-wrap {
+	margin: 0 0 20px;
+}
+
+.cast-progress-horizontal {
+	list-style: none;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0;
+	margin: 0;
+	padding: 0;
+	counter-reset: none;
+}
+
+.cast-progress-step {
+	position: relative;
+	flex: 1 1 0;
+	min-width: 90px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 6px;
+	padding: 0 8px 14px;
+	text-align: center;
+	color: #50575e;
+	font-size: 12px;
+	font-weight: 600;
+	letter-spacing: 0.01em;
+}
+
+/* connector between steps */
+.cast-progress-step::before {
+	content: "";
+	position: absolute;
+	top: 12px;
+	left: calc(-50% + 22px);
+	right: calc(50% + 22px);
+	height: 2px;
+	background: #dcdcde;
+}
+
+.cast-progress-step:first-child::before {
+	display: none;
+}
+
+.cast-progress-number {
+	position: relative;
+	z-index: 1;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	background: #fff;
+	border: 2px solid #c3c4c7;
+	color: #50575e;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.cast-progress-step-current {
+	color: var(--wp-admin-theme-color-darker-10, #135e96);
+}
+
+.cast-progress-step-current .cast-progress-number {
+	border-color: var(--wp-admin-theme-color, #2271b1);
+	background: var(--wp-admin-theme-color, #2271b1);
+	color: #ffffff;
+}
+
+.cast-progress-step-current::before {
+	background: var(--wp-admin-theme-color, #2271b1);
+}
+
+.cast-progress-step-current ~ .cast-progress-step::before {
+	background: #dcdcde;
+}
+
+.cast-progress-step-current .cast-progress-label {
+	font-weight: 700;
+}
+
+/* ------------------------- content card ----------------------- */
+
+.cast-screen-frame {
+	max-width: var(--cast-max-width);
+	margin: 0 auto;
+}
+
+.cast-screen-frame .card {
+	max-width: none;
+	margin: 0;
+	padding: 28px 28px 8px;
+}
+
+.cast-screen-frame .card h2 {
+	margin: 0 0 8px;
+	font-size: 18px;
+	line-height: 1.35;
+}
+
+.cast-screen-frame .card > p {
+	margin: 0 0 20px;
+	color: #50575e;
+	font-size: 13px;
+	line-height: 1.6;
+}
+
+/* ---------------------- welcome card ------------------------- */
+
+/* The shared welcome card is a TRUE full-width, centered block on BOTH surfaces
+   it renders on: the wizard welcome screen (inside .cast-screen-frame) and the
+   dashboard whole-width welcome panel (rendered straight into #welcome-panel,
+   with NO .cast-screen-frame wrapper). On the dashboard, WP core's `.card`
+   rule would otherwise shrink the card to max-width:520px and push it to the
+   left (margin-top:20px, no auto margins). This override re-centers it to the
+   same 640px shell width the wizard uses, so both surfaces render the shared
+   partial identically as a full-width centered card. cast-admin.css loads after
+   WP admin's common.css, so this same-specificity class wins in the cascade. */
+.cast-welcome-card {
+	max-width: var(--cast-max-width, 640px);
+	margin: 0 auto;
+	padding: 28px 28px 8px;
+}
+
+/* ---------------------- welcome title ------------------------ */
+
+/* Shared by the dashboard welcome panel and the wizard welcome screen. The
+   welcome heading is a real title and the subtitle is its own paragraph: two
+   separate semantic blocks, each centered independently as a full-width block
+   (never a narrow inline item). The title stays on one line; on narrow
+   viewports it scales down to a smaller readable size instead of being clipped
+   with an ellipsis. The subtitle keeps normal wrapping. */
+.cast-welcome-card .cast-welcome-title {
+	display: block;
+	width: 100%;
+	box-sizing: border-box;
+	margin: 0 0 8px;
+	text-align: center;
+	font-size: 18px;
+	line-height: 1.35;
+	white-space: nowrap;
+}
+
+.cast-welcome-card .cast-welcome-subtitle {
+	display: block;
+	width: 100%;
+	box-sizing: border-box;
+	margin: 0 0 20px;
+	text-align: center;
+	font-size: 13px;
+	line-height: 1.6;
+	color: #50575e;
+	white-space: normal;
+}
+
+/* ----------------------- overview/actions --------------------- */
+
+/* ONE shared action-group layout for every wizard screen (choose/install/
+   complete/skipped welcome): both the primary group (.cast-actions) and the
+   separated secondary group (.cast-secondary-actions) are flex columns with an
+   explicit 12px `gap`, so sibling controls are always separated by real spacing
+   — never stacked almost-adjacent through collapsed margins. Each group keeps
+   its own vertical rhythm via margins; groups never become full-width. */
+.cast-actions {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 12px;
+	margin: 0 0 18px;
+}
+
+/* Full-width is an intentional opt-in modifier only; the shared groups and
+   their plain `.button` controls are never full-width by default. */
+.cast-action-full {
+	display: block;
+	width: 100%;
+	box-sizing: border-box;
+	margin: 0;
+	text-align: center;
+	line-height: 2.4;
+	min-height: 40px;
+}
+
+.cast-secondary-actions {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 12px;
+	margin: 0 0 18px;
+	padding: 14px 0 4px;
+	border-top: 1px solid #dcdcde;
+}
+
+/* Secondary "escape" links (e.g. Return to dashboard) are styled WordPress link
+   buttons via the core `.button-link` class; no bare-anchor restyling here. */
+
+/* ---------------------- choose screen ------------------------- */
+
+.cast-choice-fieldset {
+	border: 0;
+	margin: 0 0 20px;
+	padding: 0;
+	min-width: 0;
+}
+
+.cast-choice-fieldset legend {
+	font-weight: 600;
+	margin-bottom: 10px;
+}
+
+.cast-choice-card {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 14px 16px;
+	margin: 10px 0;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	background: #f6f7f7;
+	cursor: pointer;
+	transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+
+.cast-choice-card:hover {
+	border-color: #c3c4c7;
+}
+
+.cast-choice-card:focus-within {
+	border-color: var(--wp-admin-theme-color, #2271b1);
+	box-shadow: 0 0 0 1px var(--wp-admin-theme-color, #2271b1);
+}
+
+.cast-choice-card-recommended {
+	background: #fff;
+	border-color: var(--wp-admin-theme-color, #2271b1);
+}
+
+.cast-choice-card input[type="radio"] {
+	margin: 2px 0 4px;
+	accent-color: var(--wp-admin-theme-color, #2271b1);
+	width: 18px;
+	height: 18px;
+}
+
+.cast-choice-title {
+	font-size: 13px;
+	font-weight: 700;
+	color: #1d2327;
+}
+
+.cast-choice-badge {
+	align-self: flex-start;
+	padding: 1px 8px;
+	border-radius: 2px;
+	background: #e7f0fa;
+	color: var(--wp-admin-theme-color-darker-10, #135e96);
+	font-size: 11px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+}
+
+.cast-choice-note {
+	font-size: 12px;
+	line-height: 1.5;
+	color: #50575e;
+}
+
+/* ---------------------- builder summary ----------------------- */
+
+.cast-build-summary {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin: 0 0 20px;
+	padding: 12px 16px;
+	background: #f6f7f7;
+	border: 1px solid #dcdcde;
+	border-left: 4px solid var(--wp-admin-theme-color, #2271b1);
+	border-radius: 4px;
+}
+
+.cast-build-summary-label {
+	font-size: 12px;
+	color: #50575e;
+}
+
+.cast-build-summary-value {
+	font-size: 14px;
+	color: #1d2327;
+	text-align: right;
+}
+
+/* ---------------------- install screen ------------------------ */
+
+.cast-install-body {
+	margin: 0 0 20px;
+}
+
+.cast-install-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.cast-install-item {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	padding: 16px;
+	margin: 0 0 12px;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	background: #fff;
+}
+
+.cast-install-item-meta {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+}
+
+.cast-install-item-meta code {
+	font-size: 11px;
+	background: #f6f7f7;
+}
+
+.cast-install-button[disabled] {
+	cursor: not-allowed;
+	background: #00a32a;
+	border-color: #00a32a;
+	color: #ffffff;
+	opacity: 1;
+}
+
+.cast-install-live {
+	min-height: 1.4em;
+	margin: 0 2px;
+	font-size: 12px;
+	color: #50575e;
+}
+
+.cast-error-panel {
+	margin: 0 0 16px;
+}
+
+/* -------------------------- notice ---------------------------- */
+
+/* slim alignment + spacing for the dashboard CTA (rendered from notice.php).
+   Get Started and Skip are one aligned, separated action group below the copy,
+   not inline text running together with it. */
+#wpbody-content .notice.cast-onboarding-notice .cast-notice-copy {
+	margin: 8px 0 12px;
+}
+
+#wpbody-content .notice.cast-onboarding-notice .cast-notice-actions {
+	display: inline-flex;
+	flex-wrap: wrap;
+	gap: 12px;
+	align-items: center;
+	margin: 0 0 8px;
+}
+
+#wpbody-content .notice.cast-onboarding-notice .cast-notice-actions form {
+	display: inline-block;
+	margin: 0;
+}
+
+#wpbody-content .notice.cast-onboarding-notice .cast-notice-actions .button {
+	line-height: 2.15384615;
+	min-height: 30px;
+}
+
+/* ------------------ keyboard focus ---------------------------- */
+
+.cast-wizard-wrap a:focus-visible,
+.cast-wizard-wrap button:focus-visible,
+.cast-wizard-wrap input:focus-visible,
+.cast-wizard-wrap textarea:focus-visible {
+	outline: var(--wp-admin-border-width-focus, 2px) solid var(--wp-admin-theme-color, #2271b1);
+	outline-offset: 2px;
+	box-shadow: none;
+}
+
+/* ------------------ reduced motion ---------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+	.cast-choice-card,
+	.cast-wizard-mark {
+		transition: none;
+	}
+}
+
+/* ----------------------- responsive --------------------------- */
+
+@media (max-width: 600px) {
+	.cast-wizard-wrap {
+		padding: 8px 4px 24px;
+	}
+
+	.cast-wizard-header {
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 10px;
+		padding: 8px 0 16px;
+	}
+
+	.cast-wizard-heading h1 {
+		font-size: 20px;
+	}
+
+	.cast-screen-frame .card,
+	.cast-welcome-card {
+		padding: 20px 18px 6px;
+	}
+
+	/* Both surfaces reduce the no-wrap title size on narrow viewports instead
+	   of clipping it. The `.cast-screen-frame .card` path raises specificity
+	   above `.cast-screen-frame .card h2` (0,2,1) so the wizard reduces too. */
+	.cast-screen-frame .card .cast-welcome-title,
+	.cast-welcome-card .cast-welcome-title {
+		font-size: 16px;
+	}
+
+	.cast-progress-step {
+		min-width: 68px;
+		font-size: 11px;
+	}
+
+	.cast-build-summary {
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 4px;
+	}
+
+	.cast-build-summary-value {
+		text-align: left;
+	}
+}

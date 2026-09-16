@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<ruleset name="LumeWeb Cast">
+    <description>PSR-12 checks for the Cast WordPress plugin.</description>
+    <rule ref="PSR12" />
+    <exclude name="PSR1.Files.SideEffects.FoundWithSymbols" />
+    <file>src</file>
+    <file>tests</file>
+    <!-- JS lives under tests/js but is exercised by the node:test harness, not by PHPCS. -->
+    <exclude-pattern>tests/js/*</exclude-pattern>
+    <arg name="basepath" value="." />
+    <arg name="colors" />
+    <arg name="warning-severity" value="0" />
+    <arg name="parallel" value="80" />
+    <arg name="report" value="full" />
+</ruleset>
