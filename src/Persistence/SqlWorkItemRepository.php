@@ -146,9 +146,20 @@ final class SqlWorkItemRepository implements WorkItemRepository
         return $this->pendingCount() > 0;
     }
 
+    /**
+     * Returns true when the item exists — its status is now the requested
+     * status — and false only when the hash is unknown.
+     *
+     * MariaDB reports 0 affected rows when an UPDATE sets a value equal to the
+     * stored one, so a same-status transition would otherwise look like a
+     * miss; the existence re-check disambiguates the unchanged-but-present
+     * case from an unknown hash.
+     */
     public function transition(string $urlHash, WorkItemStatus $status): bool
     {
-        return $this->db->query($this->sql(self::UPDATE_TRANSITION), [$status->value, $urlHash]) === 1;
+        $affected = $this->db->query($this->sql(self::UPDATE_TRANSITION), [$status->value, $urlHash]);
+
+        return $affected === 1 || $this->row($urlHash) !== null;
     }
 
     public function claimNext(): ?WorkItem
@@ -197,15 +208,26 @@ final class SqlWorkItemRepository implements WorkItemRepository
         return $attempts === null ? 0 : (int) $attempts;
     }
 
+    /**
+     * Returns true when the item exists — the row is re-queued with the new
+     * retry time — and false only when the hash is unknown.
+     *
+     * The same idempotency nuance as {@see self::transition()} applies: MariaDB
+     * reports 0 affected rows when the re-queued status and retry time already
+     * match the stored values, so the existence re-check disambiguates that
+     * unchanged-but-present case from an unknown hash.
+     */
     public function scheduleRetry(string $urlHash, int $delaySeconds): bool
     {
         $retryAt = ($this->clock)() + max(0, $delaySeconds);
 
-        return $this->db->query($this->sql(self::UPDATE_RETRY), [
+        $affected = $this->db->query($this->sql(self::UPDATE_RETRY), [
             WorkItemStatus::Queued->value,
             $retryAt,
             $urlHash,
-        ]) === 1;
+        ]);
+
+        return $affected === 1 || $this->row($urlHash) !== null;
     }
 
     public function claimNextRewritable(): ?WorkItem

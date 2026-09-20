@@ -194,6 +194,13 @@ final class FakeWpDbGateway implements WpDbGateway
             return 0;
         }
 
+        // Same changed-row semantics as transition(): re-queuing a row whose
+        // status and retry time already match affects 0 rows in MariaDB, so the
+        // repository's existence re-check, not the affected count, decides.
+        if ($row['status'] === $queued && (int) $row['retry_at'] === $retryAt) {
+            return 0;
+        }
+
         $row['status'] = $queued;
         $row['retry_at'] = $retryAt;
         $this->replace($row);
@@ -228,6 +235,14 @@ final class FakeWpDbGateway implements WpDbGateway
         $row = $this->find((string) $hash);
 
         if ($row === null) {
+            return 0;
+        }
+
+        // MariaDB reports changed rows, not matched rows: an UPDATE that sets
+        // the status to its stored value affects 0 rows even though the row
+        // exists. The repository re-checks existence after the write to
+        // disambiguate unchanged-but-present from an unknown hash.
+        if ($row['status'] === $status) {
             return 0;
         }
 

@@ -123,6 +123,32 @@ final class SqlWorkItemRepositoryTest extends TestCase
         self::assertFalse($this->repository->transition(md5('missing'), WorkItemStatus::Done));
     }
 
+    public function testSameStatusTransitionIsStillTrue(): void
+    {
+        $item = $this->item('https://example.com/');
+        $this->repository->insertCanonical($item);
+
+        // The first transition changes the stored status (one affected row).
+        self::assertTrue($this->repository->transition($item->urlHash(), WorkItemStatus::Processing));
+        self::assertSame(1, $this->repository->countByStatus(WorkItemStatus::Processing));
+
+        // Re-transitioning to the same status changes nothing in MariaDB (0
+        // affected rows), but the item exists so the transition must still win.
+        self::assertTrue($this->repository->transition($item->urlHash(), WorkItemStatus::Processing));
+        self::assertSame(1, $this->repository->countByStatus(WorkItemStatus::Processing));
+    }
+
+    public function testTransitionToDistinctStatusReturnsTrue(): void
+    {
+        $item = $this->item('https://example.com/about/');
+        $this->repository->insertCanonical($item);
+
+        self::assertTrue($this->repository->transition($item->urlHash(), WorkItemStatus::Done));
+
+        self::assertSame(0, $this->repository->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(1, $this->repository->countByStatus(WorkItemStatus::Done));
+    }
+
     public function testPendingCountReachesZeroAtFixedPoint(): void
     {
         $a = $this->item('https://example.com/a/');
@@ -246,6 +272,23 @@ final class SqlWorkItemRepositoryTest extends TestCase
     public function testScheduleRetryReturnsFalseForAnUnknownHash(): void
     {
         self::assertFalse($this->repository->scheduleRetry(md5('missing'), 5));
+    }
+
+    public function testScheduleRetryIsIdempotentWithinTheSameSecond(): void
+    {
+        $now = 1_000;
+        $repository = new SqlWorkItemRepository($this->gateway, self::TABLE, clock: static function () use (&$now): int {
+            return $now;
+        });
+        $item = $this->item('https://example.com/');
+        $repository->insertCanonical($item);
+
+        // Re-queuing the same row with the same delay twice within the same
+        // second leaves status and retry_at unchanged (0 affected rows in
+        // MariaDB), but the item exists so the retry must still report success.
+        self::assertTrue($repository->scheduleRetry($item->urlHash(), 5));
+        self::assertTrue($repository->scheduleRetry($item->urlHash(), 5));
+        self::assertSame(1, $repository->countByStatus(WorkItemStatus::Queued));
     }
 
     public function testScheduledRetryIsNotClaimableUntilItsDelayPasses(): void
