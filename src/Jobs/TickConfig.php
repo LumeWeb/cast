@@ -6,8 +6,12 @@ namespace LumeWeb\Cast\Jobs;
 
 /**
  * Tuning knobs for one export tick: which lease key to hold, for how long, and
- * whether a stale (expired) lease may be reclaimed. Holding this in a single
- * value keeps the runner's constructor and tests readable.
+ * whether a stale (expired) lease may be reclaimed. Reclaiming is the default
+ * because a crashed worker must not strand a run behind an expired lease — the
+ * next tick simply reclaims it and continues. That reclamation is safe because
+ * lease acquisition verifies ownership (see {@see WordPressLock}) before a
+ * stale lease is replaced. Holding this in a single value keeps the runner's
+ * constructor and tests readable.
  */
 final class TickConfig
 {
@@ -24,7 +28,7 @@ final class TickConfig
     public function __construct(
         public readonly string $lockKey = 'cast:export-tick',
         public readonly int $lockTtlSeconds = 60,
-        public readonly bool $reclaimStaleLocks = false,
+        public readonly bool $reclaimStaleLocks = true,
     ) {
     }
 }
