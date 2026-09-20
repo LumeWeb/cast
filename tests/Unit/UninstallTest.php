@@ -41,4 +41,26 @@ final class UninstallTest extends TestCase
 
         self::assertSame([], $GLOBALS['lumeweb_cast_network_options']);
     }
+
+    public function testUninstallDropsTheExportItemsTable(): void
+    {
+        $GLOBALS['lumeweb_cast_wpdb_queries'] = [];
+
+        Uninstall::uninstall();
+
+        self::assertNotSame(
+            [],
+            $GLOBALS['lumeweb_cast_wpdb_queries'],
+            'uninstall must drop the items table',
+        );
+        self::assertStringContainsString(
+            'DROP TABLE IF EXISTS',
+            $GLOBALS['lumeweb_cast_wpdb_queries'][0],
+        );
+        self::assertStringContainsString(
+            'wptests_cast_export_items',
+            $GLOBALS['lumeweb_cast_wpdb_queries'][0],
+            'the drop must target the plugin-owned items table',
+        );
+    }
 }

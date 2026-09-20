@@ -77,6 +77,20 @@ final class ViewRendererTest extends TestCase
         self::assertFileExists($basePath . '/page.php');
     }
 
+    /**
+     * The publish dashboard template ships in the same production tree so the
+     * PublishAdminSubscriber's default-path render() resolves a real file, not
+     * a missing-template RuntimeException.
+     */
+    public function testDefaultBasePathShipsThePublishDashboardTemplate(): void
+    {
+        $renderer = new ViewRenderer();
+        $property = new \ReflectionProperty(ViewRenderer::class, 'basePath');
+        $basePath = rtrim((string) $property->getValue($renderer), '/');
+
+        self::assertFileExists($basePath . '/publish.php');
+    }
+
     private function fixturesPath(): string
     {
         return dirname(__DIR__, 2) . '/Fixtures/Admin/templates';

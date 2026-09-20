@@ -11,7 +11,7 @@ use PHPUnit\Framework\TestCase;
  * Repo-level design/slug contracts for the dashboard + workspace wizard
  * overhaul.
  *
- * These assert the explicit, approved outcomes of this slice:
+ * These assert the explicit, approved outcomes of this overhaul:
  *   - the admin page slug is renamed to the workspace scheme;
  *   - no stale old-slug reference survives anywhere in source/templates;
  *   - the wizard stylesheet relies on the shipped WP 7.1 admin theme tokens
@@ -153,6 +153,28 @@ final class WorkspaceDesignContractTest extends TestCase
         );
         self::assertStringNotContainsString('text-overflow: ellipsis', $css);
         self::assertStringNotContainsString('overflow: hidden', $css);
+    }
+
+    public function testPublishLiveRegionUsesClipPathVisuallyHiddenPattern(): void
+    {
+        // The JS-created polite aria-live region (.cast-publish-live) must stay
+        // off-screen but present for assistive tech via the accessible
+        // visually-hidden pattern — clip-path: inset(50%) plus the legacy clip
+        // rect. It must NOT hide via overflow clipping: `overflow: hidden` is
+        // banned across the sheet (it reintroduces the clipping workaround the
+        // saga removed), so the 1px region has to clip from paint with
+        // clip-path while remaining exposed to screen readers.
+        $css = (string) file_get_contents($this->root . '/assets/css/cast-admin.css');
+        self::assertMatchesRegularExpression(
+            '/\.cast-publish-live\s*\{[^}]*position\s*:\s*absolute[^}]*clip-path\s*:\s*inset\(50%\)[^}]*\}/s',
+            $css,
+            'The publish aria-live region must use the clip-path: inset(50%) visually-hidden pattern.',
+        );
+        self::assertDoesNotMatchRegularExpression(
+            '/\.cast-publish-live\s*\{[^}]*overflow\s*:/s',
+            $css,
+            'The publish aria-live region must never hide via overflow clipping.',
+        );
     }
 
     public function testWelcomeTitleIsFullWidthCenteredAndNeverEllipsised(): void

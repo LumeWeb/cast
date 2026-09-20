@@ -71,7 +71,7 @@ function add_action(string $hook, mixed $callback, int $priority = 10, int $argu
 
 function add_filter(string $hook, mixed $callback, int $priority = 10, int $arguments = 1): bool
 {
-    $GLOBALS['lumeweb_cast_hooks'][] = ['filter', $hook, $priority, $arguments];
+    $GLOBALS['lumeweb_cast_hooks'][] = ['filter', $hook, $priority, $arguments, $callback];
     return true;
 }
 

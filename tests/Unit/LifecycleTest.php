@@ -31,6 +31,28 @@ final class LifecycleTest extends TestCase
         self::assertFalse(get_option('cast_version'));
     }
 
+    public function testActivateInstallsTheExportItemsTable(): void
+    {
+        $GLOBALS['lumeweb_cast_dbdelta_calls'] = [];
+
+        (new CastActivator('0.1.0'))->activate(false);
+
+        self::assertNotSame([], $GLOBALS['lumeweb_cast_dbdelta_calls'], 'activation must create the items table');
+        self::assertStringContainsString(
+            'CREATE TABLE wptests_cast_export_items',
+            $GLOBALS['lumeweb_cast_dbdelta_calls'][0],
+        );
+    }
+
+    public function testActivateFlushesRewriteRulesForFrontEndRouting(): void
+    {
+        $GLOBALS['lumeweb_cast_rewrite_flushes'] = 0;
+
+        (new CastActivator('0.1.0'))->activate(false);
+
+        self::assertSame(1, $GLOBALS['lumeweb_cast_rewrite_flushes'], 'activation must flush rewrite rules');
+    }
+
     public function testDeactivateLeavesVersionOptionIntact(): void
     {
         $GLOBALS['lumeweb_cast_options']['cast_version'] = '0.1.0';

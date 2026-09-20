@@ -32,6 +32,27 @@ if (!file_exists($castAutoload)) {
 require_once $castAutoload;
 
 /*
+ * Load Action Scheduler before Cast boots: Action Scheduler is Cast's single
+ * scheduling runtime (CastPlugin wires WordPressActionScheduler over the as_*
+ * gateway), so requiring its vendored plugin entry file here guarantees the
+ * as_* API is registered before any scheduler is composed. Action Scheduler
+ * ships as a plugin/library rather than a PSR-4 package, so it is loaded by
+ * its own entry file — the same embedding convention WooCommerce and other
+ * host plugins use. Its OWN WP-Cron/loopback queue runner is deliberately left
+ * enabled (never disabled here): Action Scheduler decides how the scheduled
+ * actions fire, and Cast only ever schedules and cancels through the as_* API.
+ *
+ * When the dependency is missing (e.g. an incomplete composer install) boot
+ * still proceeds; the WordPressActionScheduler seam then fails loudly and
+ * actionably on the first scheduling attempt instead of silently pretending
+ * a run was queued.
+ */
+$actionSchedulerEntry = __DIR__ . '/vendor/woocommerce/action-scheduler/action-scheduler.php';
+if (file_exists($actionSchedulerEntry)) {
+    require_once $actionSchedulerEntry;
+}
+
+/*
  * Boot during plugin-file inclusion so activation, deactivation, and uninstall
  * hooks are registered before WordPress finishes loading the plugin. Lifecycle
  * is wired together with the admin-only onboarding HookSubscriber (capability-
