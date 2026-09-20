@@ -135,20 +135,21 @@ final class JsonRewriter
 
     /**
      * JSON keys that name URL-bearing fields (matches the URL_ATTRIBUTES set
-     * of the HTML rewriter): url/uri, src/href/srcset, image(s), background,
-     * icon, logo, manifest, endpoint and link. Matching is exact whole-token
-     * equality: the key is split on camelCase boundaries and the separators
-     * '-', '_', '.' and space, then each lowercase token must equal a context
-     * word. camelCase conventions (backgroundUrl, featuredImageUrl) and the
-     * separator forms (image_url, data-src) all count, while a key that merely
-     * CONTAINS a URL word as a substring (curl, lexicon, hyperlink) does not.
+     * of the HTML rewriter): url/uri(s), src/href/srcset, image(s), background,
+     * icon(s)/logo(s), manifest, endpoint and link. Matching is exact
+     * whole-token equality: the key is split on camelCase boundaries and the
+     * separators '-', '_', '.' and space, then each lowercase token must equal
+     * a context word. camelCase conventions (backgroundUrl, featuredImageUrl)
+     * and the separator forms (image_url, data-src) all count, while a key
+     * that merely CONTAINS a URL word as a substring (curl, lexicon,
+     * hyperlink) does not.
      */
     private function keyIsUrlContext(string $key): bool
     {
         $tokens = [
-            'url', 'uri', 'src', 'srcset', 'links', 'href', 'imagesrcset',
-            'image', 'images', 'background', 'icon', 'logo', 'manifest',
-            'endpoint', 'link',
+            'url', 'urls', 'uri', 'src', 'srcs', 'srcset', 'links', 'href',
+            'imagesrcset', 'image', 'images', 'background', 'icon', 'icons',
+            'logo', 'logos', 'manifest', 'endpoint', 'link',
         ];
 
         foreach ($this->splitKeyTokens($key) as $token) {

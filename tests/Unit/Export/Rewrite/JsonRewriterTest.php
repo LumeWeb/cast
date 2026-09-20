@@ -168,6 +168,69 @@ final class JsonRewriterTest extends TestCase
     }
 
     /**
+     * The url key plural also names URL-bearing fields: each bare relative
+     * path inside an urls array is rewritten and queued, mirroring the
+     * scalar url and images pins.
+     */
+    public function testUrlsArrayElementsInheritUrlKeyContext(): void
+    {
+        [$queue, $output] = $this->rewrite('{"urls":["wp-content\/a.png"]}');
+
+        self::assertSame('{"urls":[".\/wp-content\/a.png"]}', $output);
+        self::assertSame(['2013/01/11/page-a/wp-content/a.png'], $queue->outputPaths());
+    }
+
+    /**
+     * The icon key plural also names URL-bearing fields: a bare relative path
+     * under an icons key is rewritten and queued like the icon scalar pins.
+     */
+    public function testIconsScalarValueUnderUrlKeyIsRewritten(): void
+    {
+        [$queue, $output] = $this->rewrite('{"icons":"wp-content\/b.png"}');
+
+        self::assertSame('{"icons":".\/wp-content\/b.png"}', $output);
+        self::assertSame(['2013/01/11/page-a/wp-content/b.png'], $queue->outputPaths());
+    }
+
+    /**
+     * The logo key plural also names URL-bearing fields: each asset path in a
+     * logos array is rewritten and queued like the logo scalar pins.
+     */
+    public function testLogosArrayElementsInheritUrlKeyContext(): void
+    {
+        [$queue, $output] = $this->rewrite('{"logos":["assets\/logo.svg"]}');
+
+        self::assertSame('{"logos":[".\/assets\/logo.svg"]}', $output);
+        self::assertSame(['2013/01/11/page-a/assets/logo.svg'], $queue->outputPaths());
+    }
+
+    /**
+     * The src key plural also names URL-bearing fields: each bare relative
+     * path inside a srcs array is rewritten and queued like the src scalar
+     * and array pins.
+     */
+    public function testSrcsArrayElementsInheritUrlKeyContext(): void
+    {
+        [$queue, $output] = $this->rewrite('{"srcs":["img\/c.png"]}');
+
+        self::assertSame('{"srcs":[".\/img\/c.png"]}', $output);
+        self::assertSame(['2013/01/11/page-a/img/c.png'], $queue->outputPaths());
+    }
+
+    /**
+     * "aspects" is not a URL-context token: whole-token matching must not let
+     * the singular "aspect" pin leak into the plural, so the date-like value
+     * survives verbatim (no rewrite, no capture queue).
+     */
+    public function testAspectsValueUnderNonUrlKeyIsPreserved(): void
+    {
+        [$queue, $output] = $this->rewrite('{"aspects":"2024\/01\/15"}');
+
+        self::assertSame('{"aspects":"2024\/01\/15"}', $output);
+        self::assertCount(0, $queue);
+    }
+
+    /**
      * @return array{0: CapturingQueueCollector, 1: string}
      */
     private function rewrite(string $value): array
