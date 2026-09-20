@@ -132,10 +132,20 @@ final class JobsHookSubscriber implements HookSubscriber
         }
 
         $at = $now + $this->rearmDelayFor($outcome);
-        $armed = $this->tickScheduler->scheduleSingle(
-            ContentPublishScheduler::AUTO_HOOK,
-            $at,
-        );
+        try {
+            $armed = $this->tickScheduler->scheduleSingle(
+                ContentPublishScheduler::AUTO_HOOK,
+                $at,
+            );
+        } catch (SchedulingFailedException $exception) {
+            // The real scheduler backend throws instead of returning false when
+            // Action Scheduler is unavailable or declines the insert (see
+            // WordPressActionScheduler). Route that to the same warning path so
+            // the failure never escapes the AUTO_HOOK callback and silently
+            // marks the action failed, bypassing this 'loop goes silent' guard.
+            $this->warnRearmFailed($outcome, $at);
+            return;
+        }
 
         // A rearm-worthy outcome that still could not arm a next tick is the
         // exact production dead end this pipeline guards against: no debounce,
