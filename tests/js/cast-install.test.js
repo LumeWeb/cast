@@ -6,7 +6,7 @@
  *
  * The production asset is a browser IIFE (no module system). The harness evals
  * it with injected window/document/wp doubles that mirror the WordPress core
- * `updates` contract this slice depends on:
+ * `updates` contract this module depends on:
  *
  *   - wp.updates.installPlugin({ slug, success, error })
  *   - wp.updates.activatePlugin({ slug, name, plugin, success, error })

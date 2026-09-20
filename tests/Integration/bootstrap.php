@@ -60,3 +60,15 @@ if (!defined('WP_TESTS_CONFIG_FILE_PATH')) {
 require_once $root . '/vendor/autoload.php';
 require_once $wordpressTests . '/includes/functions.php';
 require_once $wordpressTests . '/includes/bootstrap.php';
+
+// ---------------------------------------------------------------------------
+// Integration harness: boot the real Cast plugin exactly once per process,
+// injecting a recording publish transport under a test-only portal deployment
+// identity. This single boot is shared by every integration test (a later
+// require of cast.php is a no-op because CastPlugin::boot() is idempotent),
+// and TransportInjectionCompositionTest pins the boot-once / each-hook-once
+// invariants the harness guarantees. Nothing here touches production.
+// ---------------------------------------------------------------------------
+\LumeWeb\Cast\Tests\Integration\IntegrationHarness::instance(
+    \LumeWeb\Cast\Tests\Integration\IntegrationHarness::PLUGIN_FILE,
+)->boot();
