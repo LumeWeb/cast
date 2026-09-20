@@ -11,17 +11,17 @@ use LumeWeb\Cast\Persistence\OptionGateway;
 /**
  * WordPress {@see PublishRegistry} adapter.
  *
- * Persists the site's portal identity (website + IPNS key) into the same
+ * Persists the site's portal identity (IPNS key + website) into the same
  * non-autoloaded `cast_publish_identity` option the {@see WordPressIdentityGateway}
  * reads, following the PublishIdentity schema/value conventions. It is written
- * incrementally — website id + name first, IPNS key name + id second — so a
- * crash or failure between the two never loses what already exists, and the
- * stored identity only reports ready (and only becomes visible through
- * hasIdentity()/current()) once both halves are complete. Partial records still
- * surface through current() once the website half exists (what the site already
- * owns), so a resumed publish never re-creates a website or key that already
- * exists; the stored identity itself stays not-ready until the IPNS half is
- * complete too.
+ * incrementally — IPNS key name + id first, website id + name second, matching
+ * the publish() ordering (the key must exist and be published before an
+ * IPNS-targeted website can be created) — so a crash or failure between the
+ * two never loses what already exists. Partial records surface through
+ * current() as soon as EITHER half exists (whatever the site already owns), so
+ * a resumed publish never re-creates a website or key that already exists; the
+ * stored identity itself only reports ready through hasIdentity() once BOTH
+ * halves are complete.
  */
 final class WordPressPublishRegistry implements PublishRegistry
 {
@@ -38,15 +38,16 @@ final class WordPressPublishRegistry implements PublishRegistry
             return null;
         }
 
-        // The incremental write order is website first, IPNS key second, so the
-        // website half is the meaningful partial state: an IPNS key without a
-        // website is not yet something the site owns.
+        // Return the partial state once EITHER half exists (the IPNS key or the
+        // website), so a resumed publish never re-creates what the site already
+        // owns. Only a record with neither half reads as no owned state.
         $websiteId = $this->websiteId($value);
-        if ($websiteId === null) {
+        $ipnsKey = $this->ipnsKeyName($value);
+        if ($websiteId === null && $ipnsKey === null) {
             return null;
         }
 
-        return new SitePublishState($websiteId, $this->ipnsKeyName($value), $this->ipnsKeyId($value));
+        return new SitePublishState($websiteId, $ipnsKey, $this->ipnsKeyId($value));
     }
 
     public function recordWebsite(string $websiteId, string $websiteName): void
