@@ -8,8 +8,11 @@ namespace LumeWeb\Cast\Export\Rewrite;
  * JSON rewriter for JSON-in-attributes and Elementor JSON scripts.
  *
  * Decodes payloads that start with '{' or '[', walks every URL-looking string
- * key and value (heuristic: contains a '/'), resolves each through the same
- * UrlConverter/OriginPolicy pipeline as HTML/CSS so in-origin URLs are both
+ * key and value (reads-like-a-URL heuristic: scheme/root-/protocol-relative
+ * references, explicit relative './' '../' references, or slash-bearing
+ * strings under URL-context keys such as url/src/href/image/background),
+ * resolves each through the same UrlConverter/OriginPolicy pipeline as
+ * HTML/CSS so in-origin URLs are both
  * rewritten to offline './' paths and queued, and re-encodes valid JSON with
  * the default encoder (forward slashes escape to \/ like Elementor emits).
  * srcset/imagesrcset arrays (or single strings) are passed through the
@@ -46,10 +49,10 @@ final class JsonRewriter
         return $this->regexFallback($payload, $context);
     }
 
-    private function walk(mixed $value, RewriteContext $context): mixed
+    private function walk(mixed $value, RewriteContext $context, ?string $key = null): mixed
     {
         if (!\is_array($value)) {
-            if (\is_string($value) && $this->looksLikeUrl($value)) {
+            if (\is_string($value) && $this->looksLikeUrl($value, $key)) {
                 return $this->convertAndPresent($value, $context);
             }
 
@@ -58,15 +61,15 @@ final class JsonRewriter
 
         $srcsetKeys = ['srcset', 'imagesrcset'];
         $result = [];
-        foreach ($value as $key => $item) {
-            $newKey = \is_string($key) ? $this->rewrittenKey($key, $context) : $key;
+        foreach ($value as $itemKey => $item) {
+            $newKey = \is_string($itemKey) ? $this->rewrittenKey($itemKey, $context) : $itemKey;
 
             if (\is_string($newKey) && \in_array(strtolower($newKey), $srcsetKeys, true)) {
                 $result[$newKey] = $this->rewriteSrcset($item, $context);
                 continue;
             }
 
-            $result[$newKey] = $this->walk($item, $context);
+            $result[$newKey] = $this->walk($item, $context, \is_string($itemKey) ? $itemKey : null);
         }
 
         return $result;
@@ -100,14 +103,59 @@ final class JsonRewriter
     }
 
     /**
-     * A string is a URL candidate for the JSON walk when it contains a '/'.
-     * This is the practical minimal boundary: keys/vals without a slash
-     * (titles, counts, booleans) are never touched, while absolute,
-     * protocol-relative and relative references are resolved like any HTML url.
+     * A string is a URL candidate for the JSON walk when it reads like a URL:
+     * an absolute (http(s)://) or root-relative ('/...') or protocol-relative
+     * ('//host/...') reference, an explicit relative ('./', '../') reference,
+     * or — only under a URL-context key — any other slash-bearing string such
+     * as "wp-content/x.png". Slash-bearing scalars under non-URL keys (dates
+     * like "2024/01/15", ratios like "16/9") are never treated as URLs, so the
+     * rewrite pass no longer corrupts them or queues bogus capture work items.
+     *
+     * @param string|null $key the enclosing JSON key that names this value;
+     *                         null when the value has no key context (root
+     *                         values, generated keys, numeric keys)
      */
-    private function looksLikeUrl(string $value): bool
+    private function looksLikeUrl(string $value, ?string $key = null): bool
     {
-        return str_contains($value, '/');
+        if (
+            str_starts_with($value, 'http://')
+            || str_starts_with($value, 'https://')
+            || str_starts_with($value, '//')
+            || str_starts_with($value, '/')
+        ) {
+            return true;
+        }
+
+        if (str_starts_with($value, './') || str_starts_with($value, '../')) {
+            return true;
+        }
+
+        return $key !== null && $this->keyIsUrlContext($key) && str_contains($value, '/');
+    }
+
+    /**
+     * JSON keys that name URL-bearing fields (matches the URL_ATTRIBUTES set
+     * of the HTML rewriter): url/uri, src/href/srcset, image(s), background,
+     * icon, logo, manifest, endpoint and link. The check is a case-insensitive
+     * substring match so camelCase conventions (backgroundUrl, imagesrcset)
+     * all count.
+     */
+    private function keyIsUrlContext(string $key): bool
+    {
+        $needles = [
+            'url', 'uri', 'src', 'href', 'srcset', 'imagesrcset',
+            'image', 'images', 'background', 'icon', 'logo', 'manifest',
+            'endpoint', 'link',
+        ];
+        $lower = strtolower($key);
+
+        foreach ($needles as $needle) {
+            if (str_contains($lower, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function convertAndPresent(string $value, RewriteContext $context): string
