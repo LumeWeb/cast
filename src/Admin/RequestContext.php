@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace LumeWeb\Cast\Admin;
 
 /**
- * Narrow seam around WordPress request/authorization primitives so admin
+ * Narrow wrapper around WordPress request/authorization primitives so admin
  * request handling stays unit-testable without a live HTTP request.
  */
 interface RequestContext
@@ -37,4 +37,11 @@ interface RequestContext
 
     /** Redirect to the admin page (production: wp_safe_redirect + exit). */
     public function redirectToAdminPage(string $pageSlug): void;
+
+    /**
+     * Redirect back to the page the request came from, falling back to the
+     * given URL when no safe referer exists (production: wp_safe_redirect +
+     * exit; never returns).
+     */
+    public function redirectBack(string $fallbackUrl = ''): void;
 }
