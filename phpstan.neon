@@ -2,6 +2,13 @@ parameters:
     level: 8
     scanFiles:
         - vendor/php-stubs/wordpress-stubs/wordpress-stubs.php
+        # Action Scheduler (woocommerce/action-scheduler ^4.2) is a composer
+        # dependency, but it lacks a composer.json of its own, so its classes
+        # are not autoloaded by Composer. This stub declares the public as_*
+        # API plus the ActionScheduler_Store surface so the guarded
+        # WordPressActionSchedulerGateway boundary (and integration store
+        # queries) type-check dry against the 4.2.0 runtime.
+        - stubs/action-scheduler.php
     paths:
         - src
         - tests
