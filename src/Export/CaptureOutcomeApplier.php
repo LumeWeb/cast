@@ -10,17 +10,23 @@ namespace LumeWeb\Cast\Export;
  * rewrite stage's asset reconciliation so retry budgeting is never duplicated.
  *
  * A retryable outcome stays in the queue (scheduled for a later attempt) until
- * the bounded attempt budget is exhausted, at which point the row is marked
+ * the combined attempt budget is exhausted, at which point the row is marked
  * Failed as terminal — a failed asset therefore never blocks the convergence
  * of the reconciliation loop. Every other outcome moves straight to its
  * terminal status.
+ *
+ * The budget is shared with the capture service's inner retry loop: attempts
+ * already spent inside one capture() run (`CaptureResult::attempts`) are
+ * counted together with the prior queue claims (`attemptCountOf`) so a
+ * persistently retryable item is never fetched more than MAX_ATTEMPTS times
+ * in total across both layers.
  */
 final class CaptureOutcomeApplier
 {
     public function apply(WorkItemRepository $repository, string $urlHash, CaptureResult $result): void
     {
         if ($result->outcome->isRetryable()) {
-            if ($repository->attemptCountOf($urlHash) >= RetryPolicy::MAX_ATTEMPTS) {
+            if ($repository->attemptCountOf($urlHash) + $result->attempts >= RetryPolicy::MAX_ATTEMPTS) {
                 $repository->transition($urlHash, WorkItemStatus::Failed);
             } else {
                 $repository->scheduleRetry($urlHash, $result->retryDelaySeconds);
