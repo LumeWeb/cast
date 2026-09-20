@@ -69,7 +69,19 @@ final class WordPressOptionGateway implements OptionGateway
             ['%s', '%s'],
         );
 
-        return $affected === 1;
+        if ($affected !== 1) {
+            return false;
+        }
+
+        // The raw UPDATE bypasses update_option()'s object-cache refresh: a
+        // same-request get_option() would otherwise still serve the stale
+        // pre-CAS value (e.g. the old lease token), so release() would refuse
+        // to delete and the lease would leak a full TTL. Refresh the 'options'
+        // cache exactly like update_option() does on success — the cached value
+        // is the maybe_serialize()'d form, matching get_option()'s unserialize.
+        wp_cache_set($option, maybe_serialize($value), 'options');
+
+        return true;
     }
 
     /**

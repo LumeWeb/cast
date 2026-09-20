@@ -12,6 +12,7 @@ final class WordPressOptionGatewayTest extends TestCase
     protected function setUp(): void
     {
         $GLOBALS['lumeweb_cast_options'] = [];
+        $GLOBALS['lumeweb_cast_option_cache'] = [];
         $GLOBALS['lumeweb_cast_last_option_autoload'] = [];
     }
 
@@ -95,5 +96,55 @@ final class WordPressOptionGatewayTest extends TestCase
         self::assertFalse($gateway->updateIfEquals('cast_lease_run', ['token' => 'fresh'], ['token' => 'stale']));
 
         self::assertCount(1, $wpdb->updates);
+    }
+
+    public function testSuccessfulCasRefreshesTheCachedSerializedValue(): void
+    {
+        $wpdb = new FakeWpDb();
+        $gateway = new WordPressOptionGateway($wpdb);
+
+        // Prime the cache with the stale lease exactly as a preceding
+        // get_option() read would have (serialized, like core stores it).
+        $stale = ['token' => 'stale', 'expires_at' => 900, 'acquired_at' => 800];
+        wp_cache_set('cast_lease_run', maybe_serialize($stale), 'options');
+
+        $newLease = ['token' => 'fresh', 'expires_at' => 1060, 'acquired_at' => 1000];
+        $wpdb->queryResult = 1;
+        self::assertTrue($gateway->updateIfEquals('cast_lease_run', $newLease, $stale));
+
+        // The raw conditional UPDATE must refresh the 'options' cache the same
+        // way update_option() does (serialized value), so a same-request
+        // get_option() observes the fresh lease rather than the stale pre-CAS
+        // one.
+        self::assertSame(maybe_serialize($newLease), wp_cache_get('cast_lease_run', 'options'));
+    }
+
+    public function testCasThatMatchesNoRowLeavesTheStaleCacheEntryIntact(): void
+    {
+        $wpdb = new FakeWpDb();
+        $gateway = new WordPressOptionGateway($wpdb);
+
+        $stale = ['token' => 'stale', 'expires_at' => 900, 'acquired_at' => 800];
+        wp_cache_set('cast_lease_run', maybe_serialize($stale), 'options');
+
+        $wpdb->queryResult = 0;
+        self::assertFalse($gateway->updateIfEquals('cast_lease_run', ['token' => 'fresh'], $stale));
+
+        // A CAS that matched no row must not touch the cache: it stays stale.
+        self::assertSame(maybe_serialize($stale), wp_cache_get('cast_lease_run', 'options'));
+    }
+
+    public function testCasFailingOnDatabaseErrorLeavesTheCacheUntouched(): void
+    {
+        $wpdb = new FakeWpDb();
+        $gateway = new WordPressOptionGateway($wpdb);
+
+        $stale = ['token' => 'stale', 'expires_at' => 900, 'acquired_at' => 800];
+        wp_cache_set('cast_lease_run', maybe_serialize($stale), 'options');
+
+        $wpdb->queryResult = false;
+        self::assertFalse($gateway->updateIfEquals('cast_lease_run', ['token' => 'fresh'], $stale));
+
+        self::assertSame(maybe_serialize($stale), wp_cache_get('cast_lease_run', 'options'));
     }
 }
