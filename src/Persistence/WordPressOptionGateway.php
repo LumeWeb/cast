@@ -9,10 +9,27 @@ namespace LumeWeb\Cast\Persistence;
  *
  * Values are the explicitly serialized aggregate arrays; options are always
  * written with autoload disabled so plugin state never rides along on every
- * page load.
+ * page load. updateIfEquals() issues a single conditional SQL UPDATE (through
+ * `$wpdb`, not update_option(), which has no compare-and-set) so a stale
+ * worker can be refused atomically at the row level.
  */
 final class WordPressOptionGateway implements OptionGateway
 {
+    /**
+     * The live database handle (the `$wpdb` global or an injected double).
+     */
+    private readonly object $db;
+
+    public function __construct(?object $db = null)
+    {
+        $wpdb = $GLOBALS['wpdb'] ?? null;
+        if (!is_object($wpdb)) {
+            throw new \RuntimeException('WordPress option CAS requires the WordPress $wpdb global.');
+        }
+
+        $this->db = $db ?? $wpdb;
+    }
+
     public function get(string $option, mixed $default): mixed
     {
         return get_option($option, $default);
@@ -31,5 +48,44 @@ final class WordPressOptionGateway implements OptionGateway
     public function delete(string $option): bool
     {
         return delete_option($option);
+    }
+
+    public function updateIfEquals(string $option, mixed $value, mixed $expected): bool
+    {
+        // Compare-and-set in a single UPDATE: the row is only changed while its
+        // current option_value still equals the serialized $expected the caller
+        // observed, so a concurrent writer that got there first makes this a
+        // no-op. wpdb->update() serializes both sides with the same
+        // maybe_serialize() update_option() uses, so stored aggregate arrays
+        // compare byte-for-byte. A successful CAS always changes exactly one
+        // row; the "value unchanged, 0 rows affected" edge cannot occur here
+        // because $value is a fresh lease token that differs from $expected by
+        // construction.
+        $affected = $this->db()->update(
+            $this->db()->prefix . 'options',
+            ['option_value' => $value],
+            ['option_name' => $option, 'option_value' => $expected],
+            ['%s'],
+            ['%s', '%s'],
+        );
+
+        return $affected === 1;
+    }
+
+    /**
+     * The live handle, narrowed to the wpdb surface Cast talks to.
+     *
+     * No native return type: the injected handle is only ever a plain object
+     * (test doubles are never real `wpdb` instances), so the wpdb narrowing is
+     * purely a static-analysis contract and must not be enforced at runtime.
+     *
+     * @return \wpdb
+     */
+    private function db()
+    {
+        /** @var \wpdb $db */
+        $db = $this->db;
+
+        return $db;
     }
 }

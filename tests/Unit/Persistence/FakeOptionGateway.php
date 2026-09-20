@@ -30,6 +30,8 @@ final class FakeOptionGateway implements OptionGateway
 
     public int $updateCalls = 0;
 
+    public int $updateIfEqualsCalls = 0;
+
     public int $deleteCalls = 0;
 
     public function get(string $option, mixed $default): mixed
@@ -67,5 +69,23 @@ final class FakeOptionGateway implements OptionGateway
         unset($this->options[$option], $this->autoload[$option]);
 
         return $existed;
+    }
+
+    public function updateIfEquals(string $option, mixed $value, mixed $expected): bool
+    {
+        ++$this->updateIfEqualsCalls;
+
+        // Atomic compare-and-set: only overwrite while the CURRENT stored value
+        // still equals exactly what the caller observed, mirroring the single
+        // conditional UPDATE of the real gateway. A value changed in between
+        // (another worker's claim or reclaim) makes this a no-op.
+        if (!array_key_exists($option, $this->options) || $this->options[$option] !== $expected) {
+            return false;
+        }
+
+        $this->options[$option] = $value;
+        $this->autoload[$option] = false;
+
+        return true;
     }
 }

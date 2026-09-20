@@ -55,4 +55,45 @@ final class WordPressOptionGatewayTest extends TestCase
         self::assertTrue((new WordPressOptionGateway())->delete('cast_export_run'));
         self::assertArrayNotHasKey('cast_export_run', $GLOBALS['lumeweb_cast_options']);
     }
+
+    public function testUpdateIfEqualsDispatchesTheConditionalUpdateOnlyWhenValueMatches(): void
+    {
+        $wpdb = new FakeWpDb();
+        $gateway = new WordPressOptionGateway($wpdb);
+        $newLease = ['token' => 'fresh', 'expires_at' => 1060, 'acquired_at' => 1000];
+        $expected = ['token' => 'stale', 'expires_at' => 900, 'acquired_at' => 800];
+
+        $wpdb->queryResult = 1;
+        self::assertTrue($gateway->updateIfEquals('cast_lease_run', $newLease, $expected));
+
+        self::assertCount(1, $wpdb->updates);
+        [$table, $data, $where, $format, $whereFormat] = $wpdb->updates[0];
+        self::assertSame('wptests_options', $table);
+        self::assertSame(['option_value' => $newLease], $data);
+        self::assertSame(['option_name' => 'cast_lease_run', 'option_value' => $expected], $where);
+        self::assertSame(['%s'], $format);
+        self::assertSame(['%s', '%s'], $whereFormat);
+    }
+
+    public function testUpdateIfEqualsReportsFalseWhenNoRowMatched(): void
+    {
+        $wpdb = new FakeWpDb();
+        $gateway = new WordPressOptionGateway($wpdb);
+
+        $wpdb->queryResult = 0;
+        self::assertFalse($gateway->updateIfEquals('cast_lease_run', ['token' => 'fresh'], ['token' => 'stale']));
+
+        self::assertCount(1, $wpdb->updates);
+    }
+
+    public function testUpdateIfEqualsReportsFalseOnDatabaseError(): void
+    {
+        $wpdb = new FakeWpDb();
+        $gateway = new WordPressOptionGateway($wpdb);
+
+        $wpdb->queryResult = false;
+        self::assertFalse($gateway->updateIfEquals('cast_lease_run', ['token' => 'fresh'], ['token' => 'stale']));
+
+        self::assertCount(1, $wpdb->updates);
+    }
 }
