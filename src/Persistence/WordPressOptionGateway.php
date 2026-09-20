@@ -55,16 +55,16 @@ final class WordPressOptionGateway implements OptionGateway
         // Compare-and-set in a single UPDATE: the row is only changed while its
         // current option_value still equals the serialized $expected the caller
         // observed, so a concurrent writer that got there first makes this a
-        // no-op. wpdb->update() serializes both sides with the same
-        // maybe_serialize() update_option() uses, so stored aggregate arrays
-        // compare byte-for-byte. A successful CAS always changes exactly one
-        // row; the "value unchanged, 0 rows affected" edge cannot occur here
-        // because $value is a fresh lease token that differs from $expected by
-        // construction.
+        // no-op. wpdb does not serialize values itself: update_option()
+        // serializes before it writes, so both sides of the comparison are
+        // maybe_serialize()'d below to match the stored serialized shape. A
+        // successful CAS always changes exactly one row; the "value unchanged,
+        // 0 rows affected" edge cannot occur here because $value is a fresh
+        // lease token that differs from $expected by construction.
         $affected = $this->db()->update(
             $this->db()->prefix . 'options',
-            ['option_value' => $value],
-            ['option_name' => $option, 'option_value' => $expected],
+            ['option_value' => maybe_serialize($value)],
+            ['option_name' => $option, 'option_value' => maybe_serialize($expected)],
             ['%s'],
             ['%s', '%s'],
         );

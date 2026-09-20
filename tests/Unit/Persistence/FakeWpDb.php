@@ -38,6 +38,19 @@ final class FakeWpDb
     public int|false $queryResult = 1;
 
     /**
+     * Existing options table rows keyed by option_name, holding the stored raw
+     * option_value exactly as update_option() wrote it (already
+     * maybe_serialize()'d aggregate arrays for Cast's options). update() only
+     * honours the scripted queryResult when the serialized WHERE option_value
+     * genuinely matches the stored row — content-based, like the real
+     * conditional UPDATE — so tests can pin the CAS instead of trusting a
+     * blindly scripted result.
+     *
+     * @var array<string, mixed>
+     */
+    public array $rows = [];
+
+    /**
      * Every update() call: [table, data, where, format, where_format].
      *
      * @var list<array{0: string, 1: array<string, mixed>, 2: array<string, mixed>, 3: list<string>, 4: list<string>}>
@@ -104,7 +117,11 @@ final class FakeWpDb
 
     /**
      * Records the compare-and-set UPDATE the option gateway dispatches and
-     * yields the scripted affected-row count.
+     * yields the affected-row count, decided like the real wpdb conditional
+     * UPDATE: the serialized WHERE option_value must match the value actually
+     * stored in the (modelled) options row before the scripted queryResult is
+     * trusted. A false result is a database error and is returned as-is even
+     * when the WHERE matched; a non-matching WHERE affects 0 rows.
      *
      * @param array<string, mixed> $data
      * @param array<string, mixed> $where
@@ -119,6 +136,29 @@ final class FakeWpDb
         array $where_format = []
     ): int|false {
         $this->updates[] = [$table, $data, $where, $format, $where_format];
+
+        // A database error is reported as-is, exactly like wpdb.
+        if ($this->queryResult === false) {
+            return false;
+        }
+
+        $optionName = $where['option_name'] ?? '';
+        if (!is_string($optionName)) {
+            return 0;
+        }
+
+        // wpdb does not serialize values itself — update_option()/the gateway
+        // wrap them in maybe_serialize() before the call — so the WHERE and the
+        // stored row are compared in the serialized shape the row was written
+        // with, byte-for-byte.
+        $stored = $this->rows[$optionName] ?? null;
+        $expected = maybe_serialize($where['option_value'] ?? null);
+
+        if ($stored !== $expected) {
+            return 0;
+        }
+
+        $this->rows[$optionName] = maybe_serialize($data['option_value'] ?? null);
 
         return $this->queryResult;
     }

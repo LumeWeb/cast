@@ -64,16 +64,45 @@ final class WordPressOptionGatewayTest extends TestCase
         $newLease = ['token' => 'fresh', 'expires_at' => 1060, 'acquired_at' => 1000];
         $expected = ['token' => 'stale', 'expires_at' => 900, 'acquired_at' => 800];
 
+        // The stored row holds the serialized shape exactly as update_option()
+        // wrote it; only then does the CAS fire.
+        $wpdb->rows['cast_lease_run'] = maybe_serialize($expected);
         $wpdb->queryResult = 1;
         self::assertTrue($gateway->updateIfEquals('cast_lease_run', $newLease, $expected));
 
         self::assertCount(1, $wpdb->updates);
         [$table, $data, $where, $format, $whereFormat] = $wpdb->updates[0];
         self::assertSame('wptests_options', $table);
-        self::assertSame(['option_value' => $newLease], $data);
-        self::assertSame(['option_name' => 'cast_lease_run', 'option_value' => $expected], $where);
+        // wpdb does not serialize: the gateway hands over the already-serialized
+        // shapes, so the recorded UPDATE carries maybe_serialize()'d values.
+        self::assertSame(['option_value' => maybe_serialize($newLease)], $data);
+        self::assertSame(['option_name' => 'cast_lease_run', 'option_value' => maybe_serialize($expected)], $where);
         self::assertSame(['%s'], $format);
         self::assertSame(['%s', '%s'], $whereFormat);
+    }
+
+    public function testUpdateIfEqualsIsContentBasedOnTheStoredSerializedValue(): void
+    {
+        $wpdb = new FakeWpDb();
+        $gateway = new WordPressOptionGateway($wpdb);
+        $newLease = ['token' => 'fresh', 'expires_at' => 1060, 'acquired_at' => 1000];
+        $expected = ['token' => 'stale', 'expires_at' => 900, 'acquired_at' => 800];
+
+        // True content-based comparison: the stored row's option_value equals
+        // maybe_serialize($expected), so the CAS fires.
+        $wpdb->rows['cast_lease_run'] = maybe_serialize($expected);
+        $wpdb->queryResult = 1;
+        self::assertTrue($gateway->updateIfEquals('cast_lease_run', $newLease, $expected));
+
+        // A stored row whose serialized value differs ($expected changed since
+        // the caller read it) must make the CAS a no-op even though a scripted
+        // result of 1 would have claimed a row changed — this pins the repair,
+        // not a blindly scripted hit.
+        $wpdb->rows['cast_lease_run'] = maybe_serialize(['token' => 'someone-else', 'expires_at' => 99999, 'acquired_at' => 99990]);
+        $wpdb->queryResult = 1;
+        self::assertFalse($gateway->updateIfEquals('cast_lease_run', $newLease, $expected));
+
+        self::assertCount(2, $wpdb->updates);
     }
 
     public function testUpdateIfEqualsReportsFalseWhenNoRowMatched(): void
@@ -81,6 +110,8 @@ final class WordPressOptionGatewayTest extends TestCase
         $wpdb = new FakeWpDb();
         $gateway = new WordPressOptionGateway($wpdb);
 
+        // No stored row matches the serialized expected value: the conditional
+        // UPDATE affects zero rows.
         $wpdb->queryResult = 0;
         self::assertFalse($gateway->updateIfEquals('cast_lease_run', ['token' => 'fresh'], ['token' => 'stale']));
 
@@ -104,8 +135,11 @@ final class WordPressOptionGatewayTest extends TestCase
         $gateway = new WordPressOptionGateway($wpdb);
 
         // Prime the cache with the stale lease exactly as a preceding
-        // get_option() read would have (serialized, like core stores it).
+        // get_option() read would have (serialized, like core stores it), and
+        // mirror that same serialized value in the stored row so the CAS has a
+        // genuine match to fire on.
         $stale = ['token' => 'stale', 'expires_at' => 900, 'acquired_at' => 800];
+        $wpdb->rows['cast_lease_run'] = maybe_serialize($stale);
         wp_cache_set('cast_lease_run', maybe_serialize($stale), 'options');
 
         $newLease = ['token' => 'fresh', 'expires_at' => 1060, 'acquired_at' => 1000];
