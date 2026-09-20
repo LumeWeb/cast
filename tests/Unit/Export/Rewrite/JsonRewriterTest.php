@@ -20,6 +20,89 @@ final class JsonRewriterTest extends TestCase
     }
 
     /**
+     * elementor-json: the value is valid JSON with JSON-escaped slashes.
+     * The rewriter must walk the decoded structure (never smash the raw host
+     * into keys/values), queue the URL, and re-encode valid JSON preserving the
+     * input's \/ escape style.
+     */
+    public function testK5ElementorJsonRewritesUrlValueAndReescapes(): void
+    {
+        [$queue, $output] = $this->rewrite('{"url":"https:\\/\\/example.com\\/a.jpg"}');
+
+        self::assertSame('{"url":".\\/..\\/..\\/..\\/..\\/a.jpg"}', $output);
+        self::assertSame(['a.jpg'], $queue->outputPaths());
+    }
+
+    public function testValidJsonIsStillValidJson(): void
+    {
+        [, $output] = $this->rewrite('{"url":"https:\\/\\/example.com\\/a.jpg"}');
+
+        self::assertJson($output);
+        self::assertNotNull(json_decode($output));
+    }
+
+    public function testNonUrlValuesArePreserved(): void
+    {
+        $json = '{"title":"About us","count":3,"active":true,"list":[1,2,3]}';
+
+        self::assertSame($json, $this->rewrite($json)[1]);
+    }
+
+    public function testNestedUrlsAreRewritten(): void
+    {
+        [$queue, $output] = $this->rewrite('{"data":{"logo":"//example.com/wp-content/themes/x/logo.png"}}');
+
+        self::assertSame(
+            '{"data":{"logo":".\\/..\\/..\\/..\\/..\\/wp-content\\/themes\\/x\\/logo.png"}}',
+            $output
+        );
+        self::assertSame(['wp-content/themes/x/logo.png'], $queue->outputPaths());
+    }
+
+    public function testRelativeUrlUnderUrlKeyResolvesAgainstDocument(): void
+    {
+        [$queue, $output] = $this->rewrite('{"backgroundUrl":"../img/bg.png"}');
+
+        self::assertSame('{"backgroundUrl":".\\/..\\/img\\/bg.png"}', $output);
+        self::assertSame(['2013/01/11/img/bg.png'], $queue->outputPaths());
+    }
+
+    public function testSrcsetArrayCandidatesAreSplitAndRewritten(): void
+    {
+        [, $output] = $this->rewrite('{"srcset":["https:\\/\\/example.com\\/a.jpg 800w","https:\\/\\/example.com\\/b.jpg 1600w"]}');
+
+        self::assertSame(
+            '{"srcset":[".\\/..\\/..\\/..\\/..\\/a.jpg 800w",".\\/..\\/..\\/..\\/..\\/b.jpg 1600w"]}',
+            $output
+        );
+    }
+
+    public function testUrlLookingKeyIsRewrittenNotSmashed(): void
+    {
+        [$queue, $output] = $this->rewrite('{"https:\\/\\/example.com\\/about\\/":1}');
+
+        self::assertSame('{".\\/..\\/..\\/..\\/..\\/about\\/index.html":1}', $output);
+        self::assertSame(['about/index.html'], $queue->outputPaths());
+    }
+
+    public function testMalformedJsonUsesRegexFallback(): void
+    {
+        $json = '{url:"https://example.com/a.jpg"}';
+
+        [$queue, $output] = $this->rewrite($json);
+
+        self::assertSame('{url:"./../../../../a.jpg"}', $output);
+        self::assertSame(['a.jpg'], $queue->outputPaths());
+    }
+
+    public function testPlainUnrelatedStringIsUntouched(): void
+    {
+        $text = 'we keep https://example.com/a.jpg as text';
+
+        self::assertSame($text, $this->rewrite($text)[1]);
+    }
+
+    /**
      * Slash-bearing scalars under non-URL keys are data, not URLs: a date like
      * "2024/01/15" must be preserved verbatim (no rewrite, no capture queue).
      */
@@ -52,19 +135,6 @@ final class JsonRewriterTest extends TestCase
 
         self::assertSame('{"caption":".\/..\/..\/..\/..\/a.jpg"}', $output);
         self::assertSame(['a.jpg'], $queue->outputPaths());
-    }
-
-    /**
-     * Explicit relative references under URL-context keys (backgroundUrl) still
-     * resolve against the document and are rewritten offline (+ queued). The
-     * expectations below are pinned identically by the later-layer test suite.
-     */
-    public function testRelativeUrlUnderUrlKeyResolvesAgainstDocument(): void
-    {
-        [$queue, $output] = $this->rewrite('{"backgroundUrl":"..\/img\/bg.png"}');
-
-        self::assertSame('{"backgroundUrl":".\/..\/img\/bg.png"}', $output);
-        self::assertSame(['2013/01/11/img/bg.png'], $queue->outputPaths());
     }
 
     /**
