@@ -44,12 +44,35 @@ final class WordPressLock implements Lock
             return false;
         }
 
+        // The raw value tells a truly absent option (free slot — claim it
+        // atomically through the create-if-absent add()) apart from a
+        // present-but-stale/corrupt one (reclaim in place, since add() would
+        // refuse an existing option).
+        $absent = $this->options->get($option, null) === null;
+
         $token = $this->newToken();
-        $this->options->update($option, [
+        $owned = [
             'token' => $token,
             'expires_at' => $now + $ttlSeconds,
             'acquired_at' => $now,
-        ], false);
+        ];
+
+        if ($absent) {
+            // Free-slot claim: add_option()-style insert wins exactly one of
+            // the racing workers; the loser's add() no-ops instead of
+            // overwriting the winner's fresh lease.
+            if (!$this->options->add($option, $owned, false)) {
+                return false;
+            }
+        } else {
+            // Present but expired/stale/corrupt: reclaim by update. The update
+            // is best-effort — no compare-and-swap, so a worker that re-read a
+            // live lease could theoretically be overwritten — but WP-Cron
+            // serializes ticks on a single node, and release() still verifies
+            // the token before deleting, so a stale owner can never delete
+            // another worker's lease.
+            $this->options->update($option, $owned, false);
+        }
 
         $this->tokens[$key] = $token;
 
