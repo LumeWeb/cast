@@ -5,7 +5,14 @@
     "license": "GPL-3.0-or-later",
     "require": {
         "php": ">=8.2",
+        "ankitpokhrel/tus-php": "^2.4",
         "composepress/core": "dev-master",
+        "guzzlehttp/guzzle": "^7.15",
+        "guzzlehttp/psr7": "^2.13",
+        "psr/http-client": "^1.0",
+        "psr/http-factory": "^1.1",
+        "psr/http-message": "^2.0",
+        "woocommerce/action-scheduler": "^4.2",
         "yohang/finite": "^2.0"
     },
     "require-dev": {
