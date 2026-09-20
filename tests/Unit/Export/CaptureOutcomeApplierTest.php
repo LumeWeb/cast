@@ -42,7 +42,7 @@ final class CaptureOutcomeApplierTest extends TestCase
         $item = $this->factory->fromString('https://example.test/');
         $this->repository->insertCanonical($item);
 
-        $this->applier->apply($this->repository, $item->urlHash(), $this->retryable(attempts: 1));
+        $this->applier->apply($this->repository, $item, $this->retryable(attempts: 1));
 
         self::assertSame(WorkItemStatus::Queued, $this->statusOf($item), 'a retry re-queues the row');
         self::assertSame(0, $this->repository->countByStatus(WorkItemStatus::Failed));
@@ -54,7 +54,7 @@ final class CaptureOutcomeApplierTest extends TestCase
         // budget: the row must be marked Failed, never re-queued.
         $item = $this->claimTwice();
 
-        $this->applier->apply($this->repository, $item->urlHash(), $this->retryable(attempts: 2));
+        $this->applier->apply($this->repository, $item, $this->retryable(attempts: 2));
 
         self::assertSame(WorkItemStatus::Failed, $this->statusOf($item));
         self::assertSame(0, $this->repository->countByStatus(WorkItemStatus::Queued));
@@ -67,7 +67,7 @@ final class CaptureOutcomeApplierTest extends TestCase
         $item = $this->claimTwice();
         $this->claim($item);
 
-        $this->applier->apply($this->repository, $item->urlHash(), $this->retryable(attempts: 2));
+        $this->applier->apply($this->repository, $item, $this->retryable(attempts: 2));
 
         self::assertSame(WorkItemStatus::Failed, $this->statusOf($item));
         self::assertSame(0, $this->repository->countByStatus(WorkItemStatus::Queued));
@@ -82,7 +82,7 @@ final class CaptureOutcomeApplierTest extends TestCase
 
         $this->applier->apply(
             $this->repository,
-            $item->urlHash(),
+            $item,
             $this->retryable(attempts: RetryPolicy::MAX_ATTEMPTS),
         );
 
@@ -97,13 +97,13 @@ final class CaptureOutcomeApplierTest extends TestCase
         // Claim 1: one inner attempt leaves the budget open, so the row is
         // scheduled for a later claim.
         $this->claim($item);
-        $this->applier->apply($this->repository, $item->urlHash(), $this->retryable(attempts: 1));
+        $this->applier->apply($this->repository, $item, $this->retryable(attempts: 1));
         self::assertSame(WorkItemStatus::Queued, $this->statusOf($item));
 
         // Claim 2: one more inner attempt reaches the three-attempt total:
         // the row turns terminal Failed and no further claim may occur.
         $this->claim($item);
-        $this->applier->apply($this->repository, $item->urlHash(), $this->retryable(attempts: 1));
+        $this->applier->apply($this->repository, $item, $this->retryable(attempts: 1));
         self::assertSame(WorkItemStatus::Failed, $this->statusOf($item));
 
         // Total fetches across both layers never exceed the documented budget.
@@ -115,9 +115,50 @@ final class CaptureOutcomeApplierTest extends TestCase
     {
         $item = $this->claimTwice();
 
-        $this->applier->apply($this->repository, $item->urlHash(), new CaptureResult(CaptureOutcome::Redirected));
+        $this->applier->apply($this->repository, $item, new CaptureResult(CaptureOutcome::Redirected));
 
         self::assertSame(WorkItemStatus::Done, $this->statusOf($item));
+    }
+
+    public function testRedirectedNonPageEnqueuesTargetAndIsDone(): void
+    {
+        // A same-origin asset redirect writes no stub, so the resolved target
+        // must be queued as its own work item; only then may the source row
+        // land Done (no file is ever written for the source, as pinned by the
+        // capture-service-level test in CaptureServiceRedirectTest).
+        $item = $this->factory->fromString('https://example.test/wp-content/uploads/x.jpg');
+        $this->repository->insertCanonical($item);
+        $target = $this->factory->fromString('https://example.test/wp-content/uploads/y.jpg');
+
+        $this->applier->apply(
+            $this->repository,
+            $item,
+            new CaptureResult(CaptureOutcome::Redirected, redirectTarget: 'https://example.test/wp-content/uploads/y.jpg'),
+        );
+
+        self::assertSame(1, $this->repository->countByStatus(WorkItemStatus::Done), 'the source row lands Done');
+        self::assertSame(1, $this->repository->countByStatus(WorkItemStatus::Queued), 'the target is queued for capture');
+        self::assertNotNull($this->repository->priorityOf($target->urlHash()), 'the target row exists with its own hash');
+        self::assertSame('wp-content/uploads/y.jpg', $target->outputPath());
+    }
+
+    public function testRedirectedPageDoesNotEnqueueItsTarget(): void
+    {
+        // A Page redirect writes a meta-refresh stub instead, so the applier
+        // must not double-queue the same target for a later capture.
+        $item = $this->factory->fromString('https://example.test/about');
+        $this->repository->insertCanonical($item);
+        $target = $this->factory->fromString('https://example.test/new-page');
+
+        $this->applier->apply(
+            $this->repository,
+            $item,
+            new CaptureResult(CaptureOutcome::Redirected, redirectTarget: 'https://example.test/new-page'),
+        );
+
+        self::assertSame(1, $this->repository->countByStatus(WorkItemStatus::Done), 'the page lands Done with its stub');
+        self::assertNull($this->repository->priorityOf($target->urlHash()), 'a page redirect relies on its stub, not a queued target');
+        self::assertSame(0, $this->repository->countByStatus(WorkItemStatus::Queued));
     }
 
     private function retryable(int $attempts): CaptureResult

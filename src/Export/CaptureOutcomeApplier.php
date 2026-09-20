@@ -20,11 +20,23 @@ namespace LumeWeb\Cast\Export;
  * counted together with the prior queue claims (`attemptCountOf`) so a
  * persistently retryable item is never fetched more than MAX_ATTEMPTS times
  * in total across both layers.
+ *
+ * A same-origin redirect of a non-Page item carries no captured content (no
+ * stub is written), so its resolved redirect target is enqueued as its own
+ * work item here: the mirror keeps the asset by capturing the target itself
+ * instead of marking the item Done with a silently vanished file.
  */
 final class CaptureOutcomeApplier
 {
-    public function apply(WorkItemRepository $repository, string $urlHash, CaptureResult $result): void
+    public function __construct(
+        private readonly WorkItemFactory $workItemFactory = new WorkItemFactory(),
+    ) {
+    }
+
+    public function apply(WorkItemRepository $repository, WorkItem $item, CaptureResult $result): void
     {
+        $urlHash = $item->urlHash();
+
         if ($result->outcome->isRetryable()) {
             if ($repository->attemptCountOf($urlHash) + $result->attempts >= RetryPolicy::MAX_ATTEMPTS) {
                 $repository->transition($urlHash, WorkItemStatus::Failed);
@@ -37,8 +49,21 @@ final class CaptureOutcomeApplier
 
         $repository->transition($urlHash, match ($result->outcome) {
             CaptureOutcome::CanonicalTwin, CaptureOutcome::OffOrigin => WorkItemStatus::Skipped,
-            CaptureOutcome::Copied, CaptureOutcome::Fetched, CaptureOutcome::Redirected => WorkItemStatus::Done,
+            CaptureOutcome::Copied, CaptureOutcome::Fetched => WorkItemStatus::Done,
+            CaptureOutcome::Redirected => $this->redirected($repository, $item, $result),
             default => WorkItemStatus::Failed,
         });
+    }
+
+    private function redirected(WorkItemRepository $repository, WorkItem $item, CaptureResult $result): WorkItemStatus
+    {
+        // A non-Page same-origin redirect writes no stub (and no file), so the
+        // resolved target is queued as a fresh work item for a later capture;
+        // the source row still lands Done with nothing written for it.
+        if ($item->kind() !== WorkItemKind::Page && $result->redirectTarget !== null) {
+            $repository->insertCanonical($this->workItemFactory->fromString($result->redirectTarget));
+        }
+
+        return WorkItemStatus::Done;
     }
 }
