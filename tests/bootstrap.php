@@ -45,6 +45,7 @@ $GLOBALS['lumeweb_cast_plugin_root'] = dirname(__DIR__);
 $GLOBALS['lumeweb_cast_hooks'] = [];
 $GLOBALS['lumeweb_cast_lifecycle'] = [];
 $GLOBALS['lumeweb_cast_options'] = [];
+$GLOBALS['lumeweb_cast_option_cache'] = [];
 $GLOBALS['lumeweb_cast_network_options'] = [];
 $GLOBALS['lumeweb_cast_actions_fired'] = [];
 
@@ -132,6 +133,80 @@ function doing_action(string $hook_name = null): bool
 function do_action(string $hook_name, mixed ...$args): void
 {
     $GLOBALS['lumeweb_cast_actions_fired'][$hook_name][] = $args;
+}
+
+/**
+ * Standalone object-cache shims backed by a global, mirroring real WordPress'
+ * wp_cache_* contract for the 'options' group: values are stored exactly as
+ * core stores them (the maybe_serialize()'d form update_option() keeps, or the
+ * raw row value get_option() primes the cache with on first read) and
+ * wp_cache_get() reports a miss as false.
+ *
+ * The harness deliberately keeps these a standalone layer rather than wiring
+ * get_option()/update_option() through them: several downstream suites seed
+ * the option store directly across a test's lifetime and rely on read-through
+ * behaviour (wiring the cache would leak stale entries between those reads).
+ * The layer exists so a regression test can pin the production fix — the
+ * persistence gateway's compare-and-set runs a raw conditional UPDATE that
+ * bypasses update_option()'s cache refresh, so without the fix the 'options'
+ * cache keeps serving the stale pre-CAS value.
+ */
+function wp_cache_get(string $key, string $group, bool $force = false): mixed
+{
+    return $GLOBALS['lumeweb_cast_option_cache'][$group][$key] ?? false;
+}
+
+function wp_cache_set(string $key, mixed $value, string $group, int $expire = 0): bool
+{
+    $GLOBALS['lumeweb_cast_option_cache'][$group][$key] = $value;
+
+    return true;
+}
+
+function wp_cache_delete(string $key, string $group): bool
+{
+    if (!isset($GLOBALS['lumeweb_cast_option_cache'][$group][$key])) {
+        return false;
+    }
+
+    unset($GLOBALS['lumeweb_cast_option_cache'][$group][$key]);
+
+    return true;
+}
+
+/**
+ * Compact maybe_serialize()/is_serialized()/maybe_unserialize() shims so the
+ * object-cache layer stores and returns values exactly like core: arrays and
+ * objects are serialize()'d, every other value is stored as-is. Core's
+ * double-serialization of already-serialized values is intentionally omitted —
+ * the harness only ever stores fresh values.
+ */
+function maybe_serialize(mixed $data): mixed
+{
+    return is_array($data) || is_object($data) ? serialize($data) : $data;
+}
+
+function is_serialized(mixed $data): bool
+{
+    if (!is_string($data) || $data === '') {
+        return false;
+    }
+
+    // Only the documented serialized type tags (b, d, i, s, a, O, E, N) count;
+    // a plain version string like "0.1.0" never matches.
+    return (bool) preg_match('/^(?:[bidN]|a:\d+:\{|O:\d+:"|E:\d+:|s:\d+:")/', $data);
+}
+
+function maybe_unserialize(mixed $data): mixed
+{
+    if (!is_serialized($data)) {
+        return $data;
+    }
+
+    /** @var mixed $value */
+    $value = @unserialize($data);
+
+    return $value === false ? $data : $value;
 }
 
 function get_option(string $option, mixed $default = false): mixed
