@@ -21,7 +21,7 @@ final readonly class PageBuilderCandidate
      *                                       candidate is not a plugin. The only
      *                                       source the installer can drive is
      *                                       WordPress.org; any other source is
-     *                                       data left as a seam for future handling.
+     *                                       data left for future handling.
      * @param string|null $editorTarget Verified editor surface ('block',
      *                                  'classic', ...) or null until verified.
      */

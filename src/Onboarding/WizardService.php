@@ -19,7 +19,7 @@ use LumeWeb\Cast\PageBuilder\PluginStateProvider;
  * install/activation results map to structured codes chosen server-side.
  *
  * WordPress option persistence stays with WizardStore; this service only talks
- * to that seam and the transition graph.
+ * to that adapter and the transition graph.
  */
 final class WizardService
 {
