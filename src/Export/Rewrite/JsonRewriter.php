@@ -69,7 +69,7 @@ final class JsonRewriter
                 continue;
             }
 
-            $result[$newKey] = $this->walk($item, $context, \is_string($itemKey) ? $itemKey : null);
+            $result[$newKey] = $this->walk($item, $context, \is_string($itemKey) ? $itemKey : $key);
         }
 
         return $result;
@@ -136,26 +136,48 @@ final class JsonRewriter
     /**
      * JSON keys that name URL-bearing fields (matches the URL_ATTRIBUTES set
      * of the HTML rewriter): url/uri, src/href/srcset, image(s), background,
-     * icon, logo, manifest, endpoint and link. The check is a case-insensitive
-     * substring match so camelCase conventions (backgroundUrl, imagesrcset)
-     * all count.
+     * icon, logo, manifest, endpoint and link. Matching is exact whole-token
+     * equality: the key is split on camelCase boundaries and the separators
+     * '-', '_', '.' and space, then each lowercase token must equal a context
+     * word. camelCase conventions (backgroundUrl, featuredImageUrl) and the
+     * separator forms (image_url, data-src) all count, while a key that merely
+     * CONTAINS a URL word as a substring (curl, lexicon, hyperlink) does not.
      */
     private function keyIsUrlContext(string $key): bool
     {
-        $needles = [
-            'url', 'uri', 'src', 'href', 'srcset', 'imagesrcset',
+        $tokens = [
+            'url', 'uri', 'src', 'srcset', 'links', 'href', 'imagesrcset',
             'image', 'images', 'background', 'icon', 'logo', 'manifest',
             'endpoint', 'link',
         ];
-        $lower = strtolower($key);
 
-        foreach ($needles as $needle) {
-            if (str_contains($lower, $needle)) {
+        foreach ($this->splitKeyTokens($key) as $token) {
+            if (\in_array($token, $tokens, true)) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /**
+     * Split a key into lowercase whole-word tokens on camelCase boundaries
+     * (featuredImageUrl -> featured, image, url) and on the separators '-',
+     * '_', '.' and space (image_url -> image, url). A key without any boundary
+     * (imagesrcset) stays a single token, which must equal a context word
+     * outright.
+     *
+     * @return list<string>
+     */
+    private function splitKeyTokens(string $key): array
+    {
+        $parts = preg_split('/(?<=[a-z0-9])(?=[A-Z])|[-_.\\s]+/', $key, -1, PREG_SPLIT_NO_EMPTY);
+
+        if ($parts === false || $parts === []) {
+            return [strtolower($key)];
+        }
+
+        return array_map('strtolower', $parts);
     }
 
     private function convertAndPresent(string $value, RewriteContext $context): string

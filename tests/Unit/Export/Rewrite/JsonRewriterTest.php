@@ -92,6 +92,82 @@ final class JsonRewriterTest extends TestCase
     }
 
     /**
+     * "curl" merely CONTAINS the url word as a substring; whole-token matching
+     * must not treat it as a URL-context key, so the date-like value survives
+     * verbatim (no rewrite, no capture queue).
+     */
+    public function testCurlValueUnderNonUrlKeyIsPreserved(): void
+    {
+        [$queue, $output] = $this->rewrite('{"curl":"2024\/01\/15"}');
+
+        self::assertSame('{"curl":"2024\/01\/15"}', $output);
+        self::assertCount(0, $queue);
+    }
+
+    /**
+     * "lexicon" merely CONTAINS the icon word as a substring; whole-token
+     * matching must not treat it as a URL-context key, so the docs path is
+     * preserved verbatim (no rewrite, no capture queue).
+     */
+    public function testLexiconValueUnderNonUrlKeyIsPreserved(): void
+    {
+        [$queue, $output] = $this->rewrite('{"lexicon":"docs\/x"}');
+
+        self::assertSame('{"lexicon":"docs\/x"}', $output);
+        self::assertCount(0, $queue);
+    }
+
+    /**
+     * "aspect" is not a URL-context key: the "16/9" ratio is preserved even
+     * though it is slash-bearing.
+     */
+    public function testAspectRatioValueUnderNonUrlKeyIsPreserved(): void
+    {
+        [$queue, $output] = $this->rewrite('{"aspect":"16\/9"}');
+
+        self::assertSame('{"aspect":"16\/9"}', $output);
+        self::assertCount(0, $queue);
+    }
+
+    /**
+     * A camelCase URL-context key matches whole tokens: featuredImageUrl splits
+     * into featured/image/url, so a bare relative path underneath is rewritten
+     * and queued like the plain image/url scalar keys.
+     */
+    public function testCamelCaseUrlKeyMatchesWholeToken(): void
+    {
+        [$queue, $output] = $this->rewrite('{"featuredImageUrl":"wp-content\/a.png"}');
+
+        self::assertSame('{"featuredImageUrl":".\/wp-content\/a.png"}', $output);
+        self::assertSame(['2013/01/11/page-a/wp-content/a.png'], $queue->outputPaths());
+    }
+
+    /**
+     * Array elements inherit the parent key's URL context: each bare relative
+     * path inside an images array is rewritten and queued, mirroring the
+     * scalar {"images":"wp-content/a.png"} expectation.
+     */
+    public function testImageArrayElementsInheritUrlKeyContext(): void
+    {
+        [$queue, $output] = $this->rewrite('{"images":["wp-content\/a.png"]}');
+
+        self::assertSame('{"images":[".\/wp-content\/a.png"]}', $output);
+        self::assertSame(['2013/01/11/page-a/wp-content/a.png'], $queue->outputPaths());
+    }
+
+    /**
+     * Array elements under a src key inherit the URL context too, so each
+     * element is rewritten and queued like the scalar src pins.
+     */
+    public function testSrcArrayElementsInheritUrlKeyContext(): void
+    {
+        [$queue, $output] = $this->rewrite('{"src":["wp-content\/b.png"]}');
+
+        self::assertSame('{"src":[".\/wp-content\/b.png"]}', $output);
+        self::assertSame(['2013/01/11/page-a/wp-content/b.png'], $queue->outputPaths());
+    }
+
+    /**
      * @return array{0: CapturingQueueCollector, 1: string}
      */
     private function rewrite(string $value): array
