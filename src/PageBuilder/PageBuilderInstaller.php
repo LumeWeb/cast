@@ -22,7 +22,7 @@ final class PageBuilderInstaller
     /**
      * The only source this installer can drive. It installs via WordPress core
      * wp.updates.installPlugin, which resolves WordPress.org slugs; any other
-     * source is a deliberate seam and is refused rather than mis-installed.
+     * source is deliberately unsupported and is refused rather than mis-installed.
      */
     private const SUPPORTED_SOURCE = PageBuilderSource::WordPressOrg;
 

@@ -263,7 +263,7 @@ final class PageBuilderCatalogTest extends TestCase
      * An installable candidate is installable precisely because it comes from a
      * source this installer can drive (WordPress.org). Any installable entry
      * must therefore declare that source, so the installer's invalid-source
-     * gate has real metadata to enforce.
+     * check has real metadata to enforce.
      */
     public function testInstallableCandidatesCarryAValidInstallSource(): void
     {

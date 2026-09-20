@@ -10,7 +10,7 @@ namespace LumeWeb\Cast\PageBuilder;
  * This is pure data — a closed set of source identifiers, not a provider
  * abstraction or a strategy. The only source the current installer can drive is
  * WordPress.org (core's wp.updates.installPlugin installs wp.org plugin slugs).
- * Any other source is a deliberate seam for future handling: an installable
+ * Any other source is deliberately reserved for future handling: an installable
  * candidate whose source the installer does not support is refused, never
  * silently installed from the wrong place.
  */
