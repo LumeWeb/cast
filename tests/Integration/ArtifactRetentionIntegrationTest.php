@@ -179,8 +179,30 @@ final class ArtifactRetentionIntegrationTest extends TestCase
             if (is_file($path) || is_link($path)) {
                 @unlink($path);
             } elseif (is_dir($path)) {
-                (new WordPressArtifactStore())->delete($path);
+                self::removeDirectory($path);
             }
         }
+    }
+
+    /**
+     * Remove a directory tree inside the jail. The artifact store's delete()
+     * intentionally refuses everything but actual `.zip` files (the security
+     * jail), so test directories are cleaned up locally instead of being
+     * routed through it.
+     */
+    private static function removeDirectory(string $path): void
+    {
+        foreach (scandir($path) ?: [] as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            $child = $path . '/' . $entry;
+            if (is_dir($child) && !is_link($child)) {
+                self::removeDirectory($child);
+            } else {
+                @unlink($child);
+            }
+        }
+        @rmdir($path);
     }
 }
