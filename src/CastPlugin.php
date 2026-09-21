@@ -25,6 +25,7 @@ use LumeWeb\Cast\Admin\WordPressPublishedContentProbe;
 use LumeWeb\Cast\Admin\WordPressRequestContext;
 use LumeWeb\Cast\Admin\WordPressRestAuth;
 use LumeWeb\Cast\Environment\EnvIdentity;
+use LumeWeb\Cast\Environment\SignaturePepper;
 use LumeWeb\Cast\Export\CaptureStage;
 use LumeWeb\Cast\Export\DiscoverStage;
 use LumeWeb\Cast\Export\GuardedPublishStage;
@@ -263,14 +264,16 @@ final class CastPlugin
         // value-free problem state without touching the transport. The
         // transient memo keeps the always-rendering admin bar's status reads
         // from paying the portal exchange on every page load. The memo's
-        // identity digest is keyed with the site salt, which lives in
-        // wp-config — never in the database — so the persisted digest is not
-        // an offline brute-force target while still going stale on rotation.
+        // identity digest is keyed with a pepper that never lives in the
+        // database (wp-config AUTH_SALT, or the deployment env); with neither
+        // available the memo is disabled outright rather than persisting a
+        // digest a DB-only reader could verify guesses against.
+        $memoPepper = SignaturePepper::resolve();
         $connectionResolver = new PortalConnectionResolver(
             $deploymentEnv,
             $transport,
-            new WordPressTransientGateway(),
-            \wp_salt('auth'),
+            $memoPepper === null ? null : new WordPressTransientGateway(),
+            $memoPepper ?? '',
         );
         // The domain-setup REST surface also needs the portal identity (its SDK
         // domain client requires a base URL + bearer API key), so it is only

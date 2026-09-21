@@ -123,6 +123,44 @@ final class PortalConnectionResolverTest extends TestCase
         );
     }
 
+    public function testMissingPepperFailsClosedAndDisablesTheMemo(): void
+    {
+        // Without a trusted pepper (no AUTH_SALT constant, no env override)
+        // the identity digest would be verifiable by a DB-only attacker, so
+        // the memo must not be written at all — per-request memoization only.
+        $gateway = new FakeTransientGateway();
+        $recording = RecordingTransport::withResponses([
+            $this->exchangeResponse(),
+            new Response(200, [], $this->accountJson()),
+            new Response(200, [], $this->resolveJson()),
+        ]);
+        $first = new PortalConnectionResolver($this->completeIdentity(), $recording->transport(), $gateway, '');
+
+        $self = $first->current();
+        self::assertNotNull($self);
+        self::assertTrue($self->isResolved());
+        self::assertCount(3, $recording->requests());
+        self::assertNull($gateway->get('cast_self_identification', null), 'no trusted pepper must never persist a digest');
+
+        // A second instance (the next request) cannot reap the memo either:
+        // it pays the exchange again instead of reading an unkeyed digest.
+        $second = new PortalConnectionResolver(
+            $this->completeIdentity(),
+            RecordingTransport::withResponses([
+                $this->exchangeResponse(),
+                new Response(200, [], $this->accountJson()),
+                new Response(200, [], $this->resolveJson()),
+            ])->transport(),
+            $gateway,
+            '',
+        );
+        $again = $second->current();
+
+        self::assertNotNull($again);
+        self::assertTrue($again->isResolved());
+        self::assertNull($gateway->get('cast_self_identification', null));
+    }
+
     public function testUnresolvedStateIsNotCachedAcrossRequests(): void
     {
         // Empty MockHandler queue: the resolution fails into the safe error
@@ -145,7 +183,7 @@ final class PortalConnectionResolverTest extends TestCase
             new Response(200, [], $this->resolveJson()),
         ]);
         $gateway = new FakeTransientGateway();
-        $first = new PortalConnectionResolver($this->completeIdentity(), $recording->transport(), $gateway);
+        $first = new PortalConnectionResolver($this->completeIdentity(), $recording->transport(), $gateway, 'site-pepper');
 
         $self = $first->current();
         self::assertNotNull($self);
@@ -158,7 +196,7 @@ final class PortalConnectionResolverTest extends TestCase
         // A second resolver instance (the next request) reads the cached
         // identification instead of paying the portal exchange again.
         $emptyRecording = RecordingTransport::withResponses([]);
-        $second = new PortalConnectionResolver($this->completeIdentity(), $emptyRecording->transport(), $gateway);
+        $second = new PortalConnectionResolver($this->completeIdentity(), $emptyRecording->transport(), $gateway, 'site-pepper');
 
         $again = $second->current();
 

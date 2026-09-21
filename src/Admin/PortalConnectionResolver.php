@@ -67,7 +67,13 @@ final class PortalConnectionResolver implements ConnectionResolver
         }
 
         $signature = $this->identity->signature($this->signaturePepper);
-        if ($this->cache !== null && $signature !== null) {
+
+        // Fail closed: without a trusted pepper the digest is a plain hash a
+        // DB-only reader could brute-force offline, so nothing may persist.
+        $memoUsable = $this->cache !== null
+            && $this->signaturePepper !== ''
+            && $signature !== null;
+        if ($memoUsable) {
             $hit = $this->cache->get(self::CACHE_KEY, null);
             if (
                 is_array($hit)
@@ -93,7 +99,7 @@ final class PortalConnectionResolver implements ConnectionResolver
             $self = SelfIdentification::unreachable($identity);
         }
 
-        if ($this->cache !== null && $self->isResolved() && $signature !== null) {
+        if ($memoUsable && $self->isResolved()) {
             $this->cache->set(
                 self::CACHE_KEY,
                 ['signature' => $signature, 'self' => $self],
