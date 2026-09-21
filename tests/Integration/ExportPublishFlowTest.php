@@ -548,18 +548,30 @@ final class ExportPublishFlowTest extends TestCase
         // transport: enqueue the REAL portal response shapes the SDK adapters
         // decode, in the exact order the update/reuse publish path sends them.
         // A ready identity is pre-seeded above, so there is no create-website
-        // or create-key call — just re-point, publish and read back:
+        // or create-key call — just publish, re-point and read back. The IPNS
+        // publication runs AHEAD of the website re-point (an IPNS-targeted
+        // website needs its key publication before the website exists), so the
+        // queue order mirrors PublishService::publish's live call order:
         //   1. POST /api/upload            -> PostUploadResponse  {CID: string}
-        //   2. PUT /api/websites/{id}      -> WebsiteResponse (id/status/domain/
-        //                                      target_hash/target_type)
-        //   3. POST /api/ipns/publish      -> IPNSPublishResponse (name/value/
+        //   2. POST /api/ipns/publish      -> IPNSPublishResponse (name/value/
         //                                      sequence/published/validity)
+        //   3. PUT /api/websites/{id}      -> WebsiteResponse (id/status/domain/
+        //                                      target_hash/target_type)
         //   4. GET /api/websites/{id}      -> WebsiteResponse, live (active) and
         //                                      serving exactly the uploaded CID.
+        // A trailing spare readiness answer absorbs an extra wait poll without
+        // emptying the queue.
         $recorder = IntegrationHarness::instance()->recorder();
         self::assertNotNull($recorder, 'The harness must inject its recording publish transport.');
         $recorder->appendResponses([
             new Response(200, ['content-type' => 'application/json'], $this->jsonBody(['CID' => self::PUBLISH_CID])),
+            new Response(200, ['content-type' => 'application/json'], $this->jsonBody([
+                'name' => 'k51qzi5uqu5dgk6f7',
+                'value' => '/ipfs/' . self::PUBLISH_CID,
+                'sequence' => 1,
+                'published' => '2024-01-01T00:00:00Z',
+                'validity' => '2024-01-01T00:00:00Z',
+            ])),
             new Response(200, ['content-type' => 'application/json'], $this->jsonBody([
                 'id' => 1001,
                 'status' => 'active',
@@ -568,13 +580,6 @@ final class ExportPublishFlowTest extends TestCase
                 'target_type' => 'website',
                 'active_cid' => self::PUBLISH_CID,
                 'ipns_key_id' => 9001,
-            ])),
-            new Response(200, ['content-type' => 'application/json'], $this->jsonBody([
-                'name' => 'k51qzi5uqu5dgk6f7',
-                'value' => '/ipfs/' . self::PUBLISH_CID,
-                'sequence' => 1,
-                'published' => '2024-01-01T00:00:00Z',
-                'validity' => '2024-01-01T00:00:00Z',
             ])),
             new Response(200, ['content-type' => 'application/json'], $this->jsonBody([
                 'id' => 1001,
