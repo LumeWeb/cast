@@ -8,7 +8,7 @@ namespace LumeWeb\Cast\Admin;
  * Typed outcome of the guided "create a new website" action.
  *
  * Either the website was created from the preserved CID and the identity half
- * recorded (created=true, with identifiers/domain/status) or it was refused
+ * recorded (created=true, with identifiers/domain) or it was refused
  * with a typed {@see PublishWebsiteRefusal}. The serialized form is JSON-safe:
  * identifiers and the bound domain only — never credentials or internals.
  */
@@ -20,7 +20,6 @@ final class PublishWebsiteCreateResult
         public readonly ?string $websiteId = null,
         public readonly ?string $websiteName = null,
         public readonly ?string $domain = null,
-        public readonly ?string $status = null,
     ) {
     }
 
