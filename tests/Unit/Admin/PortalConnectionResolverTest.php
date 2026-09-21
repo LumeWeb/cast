@@ -87,11 +87,15 @@ final class PortalConnectionResolverTest extends TestCase
                 new Response(200, [], $this->resolveJson()),
             ])->transport(),
             $gateway,
+            'site-pepper',
         );
         $before = $booted->current();
         self::assertNotNull($before);
         self::assertSame('a@b.test', $before->account()?->email());
 
+        // A key rotation under the same site pepper is exactly the change
+        // the keyed digest must catch: the memo written under the old key is
+        // a miss, and the fresh resolve answers with the new account's data.
         $rotatedRecording = RecordingTransport::withResponses([
             $this->exchangeResponse(),
             new Response(200, [], $this->accountJson()),
@@ -100,15 +104,12 @@ final class PortalConnectionResolverTest extends TestCase
         $afterRotation = new PortalConnectionResolver(
             $this->identity([
                 EnvIdentity::PORTAL_API_URL => self::BASE_URL,
-                // Changed resource UUID: the deployment moved to a different
-                // workspace, which the signature must distinguish. (A credential
-                // rotation on the same workspace is deliberately NOT a memo
-                // miss — credential values never enter the persisted digest.)
                 EnvIdentity::PORTAL_API_KEY => 'rotated-account-key-abc',
-                EnvIdentity::COOLIFY_RESOURCE_UUID => 'res-uuid-other-456',
+                EnvIdentity::COOLIFY_RESOURCE_UUID => self::RESOURCE_UUID,
             ]),
             $rotatedRecording->transport(),
             $gateway,
+            'site-pepper',
         );
 
         $self = $afterRotation->current();
@@ -118,7 +119,7 @@ final class PortalConnectionResolverTest extends TestCase
         self::assertCount(
             3,
             $rotatedRecording->requests(),
-            'A memo written under a different deployment identity must be a miss, never a silent stale answer.',
+            'A memo written under a rotated credential must be a miss, never a silent stale answer.',
         );
     }
 

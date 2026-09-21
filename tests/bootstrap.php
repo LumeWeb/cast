@@ -246,6 +246,11 @@ function delete_transient(string $transient): bool
     return true;
 }
 
+function wp_salt(string $scheme = 'auth'): string
+{
+    return 'unit-test-salt-' . $scheme;
+}
+
 function get_network_option(int|null $networkId, string $option, mixed $default = false): mixed
 {
     return $GLOBALS['lumeweb_cast_network_options'][$option] ?? $default;

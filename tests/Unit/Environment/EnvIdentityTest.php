@@ -84,15 +84,14 @@ final class EnvIdentityTest extends TestCase
         self::assertNotSame($base, $this->identity($changedUuid)->signature());
     }
 
-    public function testSignatureExcludesCredentialValues(): void
+    public function testSignatureChangesWhenACredentialChangesUnderTheSamePepper(): void
     {
-        // The signature is persisted in the memo transient, so it must never
-        // carry a hashed credential: a DB reader could otherwise brute-force
-        // a low-entropy key offline. Credential rotation on the same
-        // workspace deliberately keeps the memo (the self-identification it
-        // holds is workspace-scoped and TTL-bounded, and the digest carries
-        // no secret to betray anything).
-        $base = $this->identity($this->completeVars())->signature();
+        // The digest is a keyed HMAC (the pepper comes from wp-config's salt,
+        // never the database), so a DB-only reader has no verifiable offline
+        // brute-force target, and a credential rotation still produces a
+        // different signature — the memo goes stale on rotation, exactly what
+        // the resolver's invalidation needs.
+        $base = $this->identity($this->completeVars())->signature('site-pepper');
         self::assertNotNull($base);
 
         $rotatedKey = $this->completeVars();
@@ -100,8 +99,39 @@ final class EnvIdentityTest extends TestCase
         $rotatedPassword = $this->completeVars();
         $rotatedPassword[EnvIdentity::WORKSPACE_AUTH_PASSWORD] = 'other-workspace-pass';
 
-        self::assertSame($base, $this->identity($rotatedKey)->signature());
-        self::assertSame($base, $this->identity($rotatedPassword)->signature());
+        self::assertNotSame($base, $this->identity($rotatedKey)->signature('site-pepper'));
+        self::assertNotSame($base, $this->identity($rotatedPassword)->signature('site-pepper'));
+    }
+
+    public function testSignatureIsPepperBound(): void
+    {
+        self::assertNotNull($this->identity($this->completeVars())->signature('site-pepper'));
+        self::assertSame(
+            $this->identity($this->completeVars())->signature('site-pepper'),
+            $this->identity($this->completeVars())->signature('site-pepper'),
+        );
+        self::assertNotSame(
+            $this->identity($this->completeVars())->signature('site-pepper'),
+            $this->identity($this->completeVars())->signature('other-site-pepper'),
+        );
+    }
+
+    public function testSignatureIsNotAPlainCredentialHash(): void
+    {
+        // The digest must not be reproducible without the pepper: assert it
+        // is NOT the unsalted sha256 of the credential or of raw parts.
+        $vars = $this->completeVars();
+        $signature = (string) $this->identity($vars)->signature('site-pepper');
+
+        self::assertNotSame(
+            hash('sha256', 'rotated-account-key'),
+            $this->identity(array_merge($vars, [EnvIdentity::PORTAL_API_KEY => 'rotated-account-key']))->signature('site-pepper'),
+        );
+        self::assertNotSame(
+            hash('sha256', urlencode('secret-account-key')),
+            $this->identity($vars)->signature('site-pepper'),
+        );
+        self::assertSame(64, strlen($signature));
     }
 
     public function testSignatureStillTracksAccountDistinguishingVariables(): void

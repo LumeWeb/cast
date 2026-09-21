@@ -262,11 +262,15 @@ final class CastPlugin
         // incomplete deployment env the resolver short-circuits to a safe
         // value-free problem state without touching the transport. The
         // transient memo keeps the always-rendering admin bar's status reads
-        // from paying the portal exchange on every page load.
+        // from paying the portal exchange on every page load. The memo's
+        // identity digest is keyed with the site salt, which lives in
+        // wp-config — never in the database — so the persisted digest is not
+        // an offline brute-force target while still going stale on rotation.
         $connectionResolver = new PortalConnectionResolver(
             $deploymentEnv,
             $transport,
             new WordPressTransientGateway(),
+            \wp_salt('auth'),
         );
         // The domain-setup REST surface also needs the portal identity (its SDK
         // domain client requires a base URL + bearer API key), so it is only

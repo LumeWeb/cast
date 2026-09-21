@@ -54,6 +54,9 @@ final class PortalConnectionResolver implements ConnectionResolver
         private readonly EnvIdentity $identity,
         private readonly HttpTransport $transport,
         private readonly ?TransientGateway $cache = null,
+        // The site pepper (wp_salt), so the memo's persisted digest is keyed
+        // by a secret that is never stored in the options database.
+        private readonly string $signaturePepper = '',
     ) {
     }
 
@@ -63,7 +66,7 @@ final class PortalConnectionResolver implements ConnectionResolver
             return $this->cached;
         }
 
-        $signature = $this->identity->signature();
+        $signature = $this->identity->signature($this->signaturePepper);
         if ($this->cache !== null && $signature !== null) {
             $hit = $this->cache->get(self::CACHE_KEY, null);
             if (

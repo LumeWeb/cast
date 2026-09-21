@@ -133,25 +133,25 @@ final class EnvIdentity
     }
 
     /**
-     * A value-free digest of the identity-distinguishing environment
-     * variables (portal base, workspace URL, resource UUID, workspace auth
-     * username), or null when the identity is incomplete (there is no
-     * identity to key on).
+     * A value-free keyed digest of the whole deployment identity, or null
+     * when the identity is incomplete (there is no identity to key on).
      *
      * Memoization stores use it as a cache-miss signature: a memo written
      * under one deployment identity must never be served to a request whose
-     * identity changed (re-pointed portal base, different workspace), so the
-     * consumer compares this digest alongside the cached value.
+     * identity changed (credential rotation, re-pointed portal base,
+     * different workspace), so the consumer compares this digest alongside
+     * the cached value.
      *
-     * The credential VALUES (PORTAL_API_KEY, workspace auth password) are
-     * deliberately excluded: the digest is persisted inside the memo
-     * transient, and a hashed credential in the options database would give
-     * a DB-only attacker an offline brute-force target. Credential rotation
-     * on the same workspace therefore keeps the memo — the cached
-     * self-identification is workspace-scoped and TTL-bounded, so that is
-     * exactly what a short-TTL memo is for.
+     * The digest is an HMAC over the component values with $pepper as its
+     * key, and the pepper must come from a secret that is never persisted in
+     * the database (wp_salt): a DB-only reader then holds a keyed digest it
+     * cannot verify guesses against, so credentials gain no offline
+     * brute-force target, while a rotation under an unchanged pepper still
+     * changes the digest and staleness rules.
+     *
+     * The digest never carries or reveals the values themselves.
      */
-    public function signature(): ?string
+    public function signature(string $pepper = ''): ?string
     {
         if (!$this->isComplete()) {
             return null;
@@ -159,12 +159,14 @@ final class EnvIdentity
 
         [$url, $key, $workspaceAuth, $workspaceUrl, $resourceUuid] = $this->identityComponents();
 
-        return hash('sha256', implode("\0", [
+        return hash_hmac('sha256', implode("\0", [
             $url,
+            $key,
             $workspaceUrl ?? '',
             $resourceUuid ?? '',
             $workspaceAuth?->username() ?? '',
-        ]));
+            $workspaceAuth?->password() ?? '',
+        ]), $pepper);
     }
 
     /**
