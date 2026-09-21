@@ -133,15 +133,23 @@ final class EnvIdentity
     }
 
     /**
-     * A value-free digest of every identity-relevant environment variable, or
-     * null when the identity is incomplete (there is no identity to key on).
+     * A value-free digest of the identity-distinguishing environment
+     * variables (portal base, workspace URL, resource UUID, workspace auth
+     * username), or null when the identity is incomplete (there is no
+     * identity to key on).
      *
      * Memoization stores use it as a cache-miss signature: a memo written
      * under one deployment identity must never be served to a request whose
-     * identity changed (credential rotation, re-pointed portal base), so the
+     * identity changed (re-pointed portal base, different workspace), so the
      * consumer compares this digest alongside the cached value.
      *
-     * The digest never carries or reveals the values themselves.
+     * The credential VALUES (PORTAL_API_KEY, workspace auth password) are
+     * deliberately excluded: the digest is persisted inside the memo
+     * transient, and a hashed credential in the options database would give
+     * a DB-only attacker an offline brute-force target. Credential rotation
+     * on the same workspace therefore keeps the memo — the cached
+     * self-identification is workspace-scoped and TTL-bounded, so that is
+     * exactly what a short-TTL memo is for.
      */
     public function signature(): ?string
     {
@@ -151,13 +159,12 @@ final class EnvIdentity
 
         [$url, $key, $workspaceAuth, $workspaceUrl, $resourceUuid] = $this->identityComponents();
 
-        $parts = [$url, $key, $workspaceUrl, $resourceUuid];
-        if ($workspaceAuth !== null) {
-            $parts[] = $workspaceAuth->username();
-            $parts[] = $workspaceAuth->password();
-        }
-
-        return hash('sha256', implode("\0", $parts));
+        return hash('sha256', implode("\0", [
+            $url,
+            $workspaceUrl ?? '',
+            $resourceUuid ?? '',
+            $workspaceAuth?->username() ?? '',
+        ]));
     }
 
     /**

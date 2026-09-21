@@ -68,12 +68,9 @@ final class EnvIdentityTest extends TestCase
     {
         $base = $this->identity($this->completeVars())->signature();
 
-        $rotatedKey = $this->completeVars();
-        $rotatedKey[EnvIdentity::PORTAL_API_KEY] = 'rotated-account-key';
         $rotatedUrl = $this->completeVars();
         $rotatedUrl[EnvIdentity::PORTAL_API_URL] = 'https://other.pinner.test';
 
-        self::assertNotSame($base, $this->identity($rotatedKey)->signature());
         self::assertNotSame($base, $this->identity($rotatedUrl)->signature());
     }
 
@@ -85,6 +82,39 @@ final class EnvIdentityTest extends TestCase
         $changedUuid[EnvIdentity::COOLIFY_RESOURCE_UUID] = 'res-uuid-other-456';
 
         self::assertNotSame($base, $this->identity($changedUuid)->signature());
+    }
+
+    public function testSignatureExcludesCredentialValues(): void
+    {
+        // The signature is persisted in the memo transient, so it must never
+        // carry a hashed credential: a DB reader could otherwise brute-force
+        // a low-entropy key offline. Credential rotation on the same
+        // workspace deliberately keeps the memo (the self-identification it
+        // holds is workspace-scoped and TTL-bounded, and the digest carries
+        // no secret to betray anything).
+        $base = $this->identity($this->completeVars())->signature();
+        self::assertNotNull($base);
+
+        $rotatedKey = $this->completeVars();
+        $rotatedKey[EnvIdentity::PORTAL_API_KEY] = 'rotated-account-key';
+        $rotatedPassword = $this->completeVars();
+        $rotatedPassword[EnvIdentity::WORKSPACE_AUTH_PASSWORD] = 'other-workspace-pass';
+
+        self::assertSame($base, $this->identity($rotatedKey)->signature());
+        self::assertSame($base, $this->identity($rotatedPassword)->signature());
+    }
+
+    public function testSignatureStillTracksAccountDistinguishingVariables(): void
+    {
+        $base = $this->identity($this->completeVars())->signature();
+
+        $changedUsername = $this->completeVars();
+        $changedUsername[EnvIdentity::WORKSPACE_AUTH_USERNAME] = 'other-operator';
+        $changedWorkspaceUrl = $this->completeVars();
+        $changedWorkspaceUrl[EnvIdentity::PORTAL_WORKSPACE_URL] = 'https://elsewhere.example.test';
+
+        self::assertNotSame($base, $this->identity($changedUsername)->signature());
+        self::assertNotSame($base, $this->identity($changedWorkspaceUrl)->signature());
     }
 
     public function testSignatureIsValueFree(): void

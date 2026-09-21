@@ -100,8 +100,12 @@ final class PortalConnectionResolverTest extends TestCase
         $afterRotation = new PortalConnectionResolver(
             $this->identity([
                 EnvIdentity::PORTAL_API_URL => self::BASE_URL,
+                // Changed resource UUID: the deployment moved to a different
+                // workspace, which the signature must distinguish. (A credential
+                // rotation on the same workspace is deliberately NOT a memo
+                // miss — credential values never enter the persisted digest.)
                 EnvIdentity::PORTAL_API_KEY => 'rotated-account-key-abc',
-                EnvIdentity::COOLIFY_RESOURCE_UUID => self::RESOURCE_UUID,
+                EnvIdentity::COOLIFY_RESOURCE_UUID => 'res-uuid-other-456',
             ]),
             $rotatedRecording->transport(),
             $gateway,
