@@ -194,19 +194,3 @@ final class PortalConnectionResolverTest extends TestCase
         self::assertStringNotContainsString(self::SECRET_KEY, (string) $self->error());
     }
 }
-
-final class FakeTransientGateway implements TransientGateway
-{
-    /** @var array<string, mixed> */
-    private array $store = [];
-
-    public function get(string $key, mixed $default): mixed
-    {
-        return $this->store[$key] ?? $default;
-    }
-
-    public function set(string $key, mixed $value, int $ttlSeconds): void
-    {
-        $this->store[$key] = $value;
-    }
-}
