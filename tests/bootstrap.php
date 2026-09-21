@@ -234,6 +234,18 @@ function delete_option(string $option): bool
     return true;
 }
 
+/**
+ * Records every deletion so uninstall/cleanup paths can assert the exact set
+ * of plugin-owned transients they removed.
+ */
+$GLOBALS['lumeweb_cast_transients_deleted'] = [];
+
+function delete_transient(string $transient): bool
+{
+    $GLOBALS['lumeweb_cast_transients_deleted'][] = $transient;
+    return true;
+}
+
 function get_network_option(int|null $networkId, string $option, mixed $default = false): mixed
 {
     return $GLOBALS['lumeweb_cast_network_options'][$option] ?? $default;

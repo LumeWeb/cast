@@ -40,6 +40,68 @@ final class EnvIdentityTest extends TestCase
         return new EnvIdentity($reader);
     }
 
+    /**
+     * @return array<string, string>
+     */
+    private function completeVars(): array
+    {
+        return [
+            EnvIdentity::PORTAL_API_URL => 'https://pinner.xyz:8443',
+            EnvIdentity::PORTAL_API_KEY => 'secret-account-key',
+            EnvIdentity::WORKSPACE_AUTH_USERNAME => 'operator',
+            EnvIdentity::WORKSPACE_AUTH_PASSWORD => 'workspace-pass',
+            EnvIdentity::PORTAL_WORKSPACE_URL => 'https://cast.example.test',
+            EnvIdentity::COOLIFY_RESOURCE_UUID => 'res-uuid-abc-123',
+        ];
+    }
+
+    public function testSignatureIsStableForTheSameEnvironment(): void
+    {
+        self::assertNotNull($this->identity($this->completeVars())->signature());
+        self::assertSame(
+            $this->identity($this->completeVars())->signature(),
+            $this->identity($this->completeVars())->signature(),
+        );
+    }
+
+    public function testSignatureChangesWhenAnIdentityVariableChanges(): void
+    {
+        $base = $this->identity($this->completeVars())->signature();
+
+        $rotatedKey = $this->completeVars();
+        $rotatedKey[EnvIdentity::PORTAL_API_KEY] = 'rotated-account-key';
+        $rotatedUrl = $this->completeVars();
+        $rotatedUrl[EnvIdentity::PORTAL_API_URL] = 'https://other.pinner.test';
+
+        self::assertNotSame($base, $this->identity($rotatedKey)->signature());
+        self::assertNotSame($base, $this->identity($rotatedUrl)->signature());
+    }
+
+    public function testSignatureChangesWhenAnOptionalIdentityVariableChanges(): void
+    {
+        $base = $this->identity($this->completeVars())->signature();
+
+        $changedUuid = $this->completeVars();
+        $changedUuid[EnvIdentity::COOLIFY_RESOURCE_UUID] = 'res-uuid-other-456';
+
+        self::assertNotSame($base, $this->identity($changedUuid)->signature());
+    }
+
+    public function testSignatureIsValueFree(): void
+    {
+        $signature = (string) $this->identity($this->completeVars())->signature();
+
+        self::assertSame(64, strlen($signature));
+        self::assertStringNotContainsString('secret-account-key', $signature);
+        self::assertStringNotContainsString('pinner.xyz', $signature);
+        self::assertStringNotContainsString('operator', $signature);
+    }
+
+    public function testSignatureIsNullWhenTheIdentityIsIncomplete(): void
+    {
+        self::assertNull($this->identity([EnvIdentity::PORTAL_API_URL => 'https://pinner.xyz'])->signature());
+    }
+
     public function testReadsCompleteIdentityFromEnvironment(): void
     {
         $identity = $this->identity([

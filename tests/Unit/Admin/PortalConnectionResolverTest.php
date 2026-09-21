@@ -72,6 +72,52 @@ final class PortalConnectionResolverTest extends TestCase
      * The POST /api/auth/key success response that exchanges the workspace API
      * key for the login-purpose auth key account.pinner.xyz accepts.
      */
+    public function testSignatureChangeTreatsTheMemoAsAMiss(): void
+    {
+        // A memo written under one deployment identity must never serve a
+        // request whose identity changed (credential rotation, re-pointed
+        // portal base): the wrong identity would silently answer the
+        // Connection card and every state-gated publish action.
+        $gateway = new FakeTransientGateway();
+        $booted = new PortalConnectionResolver(
+            $this->completeIdentity(),
+            RecordingTransport::withResponses([
+                $this->exchangeResponse(),
+                new Response(200, [], $this->accountJson()),
+                new Response(200, [], $this->resolveJson()),
+            ])->transport(),
+            $gateway,
+        );
+        $before = $booted->current();
+        self::assertNotNull($before);
+        self::assertSame('a@b.test', $before->account()?->email());
+
+        $rotatedRecording = RecordingTransport::withResponses([
+            $this->exchangeResponse(),
+            new Response(200, [], $this->accountJson()),
+            new Response(200, [], $this->resolveJson()),
+        ]);
+        $afterRotation = new PortalConnectionResolver(
+            $this->identity([
+                EnvIdentity::PORTAL_API_URL => self::BASE_URL,
+                EnvIdentity::PORTAL_API_KEY => 'rotated-account-key-abc',
+                EnvIdentity::COOLIFY_RESOURCE_UUID => self::RESOURCE_UUID,
+            ]),
+            $rotatedRecording->transport(),
+            $gateway,
+        );
+
+        $self = $afterRotation->current();
+
+        self::assertNotNull($self);
+        self::assertTrue($self->isResolved());
+        self::assertCount(
+            3,
+            $rotatedRecording->requests(),
+            'A memo written under a different deployment identity must be a miss, never a silent stale answer.',
+        );
+    }
+
     public function testUnresolvedStateIsNotCachedAcrossRequests(): void
     {
         // Empty MockHandler queue: the resolution fails into the safe error
@@ -100,7 +146,9 @@ final class PortalConnectionResolverTest extends TestCase
         self::assertNotNull($self);
         self::assertTrue($self->isResolved());
         self::assertCount(3, $recording->requests());
-        self::assertInstanceOf(SelfIdentification::class, $gateway->get(self::CACHE_KEY, null));
+        $memo = $gateway->get(self::CACHE_KEY, null);
+        self::assertIsArray($memo);
+        self::assertInstanceOf(SelfIdentification::class, $memo['self'] ?? null);
 
         // A second resolver instance (the next request) reads the cached
         // identification instead of paying the portal exchange again.

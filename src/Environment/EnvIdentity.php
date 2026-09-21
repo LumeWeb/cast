@@ -127,6 +127,46 @@ final class EnvIdentity
             return null;
         }
 
+        [$url, $key, $workspaceAuth, $workspaceUrl, $resourceUuid] = $this->identityComponents();
+
+        return new PortalIdentity($url, $key, $workspaceAuth, $workspaceUrl, $resourceUuid);
+    }
+
+    /**
+     * A value-free digest of every identity-relevant environment variable, or
+     * null when the identity is incomplete (there is no identity to key on).
+     *
+     * Memoization stores use it as a cache-miss signature: a memo written
+     * under one deployment identity must never be served to a request whose
+     * identity changed (credential rotation, re-pointed portal base), so the
+     * consumer compares this digest alongside the cached value.
+     *
+     * The digest never carries or reveals the values themselves.
+     */
+    public function signature(): ?string
+    {
+        if (!$this->isComplete()) {
+            return null;
+        }
+
+        [$url, $key, $workspaceAuth, $workspaceUrl, $resourceUuid] = $this->identityComponents();
+
+        $parts = [$url, $key, $workspaceUrl, $resourceUuid];
+        if ($workspaceAuth !== null) {
+            $parts[] = $workspaceAuth->username();
+            $parts[] = $workspaceAuth->password();
+        }
+
+        return hash('sha256', implode("\0", $parts));
+    }
+
+    /**
+     * The identity components, extracted exactly as resolve() assembles them.
+     *
+     * @return array{0:string,1:string,2:?WorkspaceAuth,3:?string,4:?string}
+     */
+    private function identityComponents(): array
+    {
         $url = (string) $this->env->get(self::PORTAL_API_URL);
         $key = trim((string) $this->env->get(self::PORTAL_API_KEY));
 
@@ -139,13 +179,13 @@ final class EnvIdentity
         $workspaceUrl = $this->nonEmpty(self::PORTAL_WORKSPACE_URL);
         $resourceUuid = $this->nonEmpty(self::COOLIFY_RESOURCE_UUID);
 
-        return new PortalIdentity(
+        return [
             self::normalizedPortalBaseUrl($url) ?? $url,
             $key,
             $workspaceAuth,
             $workspaceUrl,
             $resourceUuid,
-        );
+        ];
     }
 
     /**
