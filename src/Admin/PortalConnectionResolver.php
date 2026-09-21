@@ -31,10 +31,18 @@ use LumeWeb\Cast\Portal\SelfIdentification;
  * Only a fully resolved (healthy) identification is written to the transient
  * — error states are recomputed on demand instead of being pinned for the
  * whole TTL — so a transient failure surfaces once the next request refetches.
+ * The memo carries the deployment identity's value-free {@see EnvIdentity
+ * signature}: a memo written under a rotated credential or re-pointed portal
+ * base is a cache miss, never silently served to a request with a changed
+ * identity.
  */
 final class PortalConnectionResolver implements ConnectionResolver
 {
-    private const CACHE_KEY = 'cast_self_identification';
+    /**
+     * Public so the uninstaller can remove the memo row; a surviving
+     * transient would be plugin-owned residue in the options database.
+     */
+    public const CACHE_KEY = 'cast_self_identification';
 
     private const CACHE_TTL_SECONDS = 300;
 
@@ -46,6 +54,9 @@ final class PortalConnectionResolver implements ConnectionResolver
         private readonly EnvIdentity $identity,
         private readonly HttpTransport $transport,
         private readonly ?TransientGateway $cache = null,
+        // The site pepper (wp_salt), so the memo's persisted digest is keyed
+        // by a secret that is never stored in the options database.
+        private readonly string $signaturePepper = '',
     ) {
     }
 
@@ -55,13 +66,24 @@ final class PortalConnectionResolver implements ConnectionResolver
             return $this->cached;
         }
 
-        if ($this->cache !== null) {
+        $signature = $this->identity->signature($this->signaturePepper);
+
+        // Fail closed: without a trusted pepper the digest is a plain hash a
+        // DB-only reader could brute-force offline, so nothing may persist.
+        $memoUsable = $this->cache !== null
+            && $this->signaturePepper !== ''
+            && $signature !== null;
+        if ($memoUsable) {
             $hit = $this->cache->get(self::CACHE_KEY, null);
-            if ($hit instanceof SelfIdentification) {
-                $this->cached = $hit;
+            if (
+                is_array($hit)
+                && ($hit['signature'] ?? null) === $signature
+                && $hit['self'] instanceof SelfIdentification
+            ) {
+                $this->cached = $hit['self'];
                 $this->resolved = true;
 
-                return $hit;
+                return $this->cached;
             }
         }
 
@@ -77,13 +99,17 @@ final class PortalConnectionResolver implements ConnectionResolver
             $self = SelfIdentification::unreachable($identity);
         }
 
-        if ($this->cache !== null && $self->isResolved()) {
-            $this->cache->set(self::CACHE_KEY, $self, self::CACHE_TTL_SECONDS);
+        if ($memoUsable && $self->isResolved()) {
+            $this->cache->set(
+                self::CACHE_KEY,
+                ['signature' => $signature, 'self' => $self],
+                self::CACHE_TTL_SECONDS,
+            );
         }
 
         $this->cached = $self;
         $this->resolved = true;
 
-        return $self;
+        return $this->cached;
     }
 }

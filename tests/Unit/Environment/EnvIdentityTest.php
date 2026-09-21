@@ -40,6 +40,128 @@ final class EnvIdentityTest extends TestCase
         return new EnvIdentity($reader);
     }
 
+    /**
+     * @return array<string, string>
+     */
+    private function completeVars(): array
+    {
+        return [
+            EnvIdentity::PORTAL_API_URL => 'https://pinner.xyz:8443',
+            EnvIdentity::PORTAL_API_KEY => 'secret-account-key',
+            EnvIdentity::WORKSPACE_AUTH_USERNAME => 'operator',
+            EnvIdentity::WORKSPACE_AUTH_PASSWORD => 'workspace-pass',
+            EnvIdentity::PORTAL_WORKSPACE_URL => 'https://cast.example.test',
+            EnvIdentity::COOLIFY_RESOURCE_UUID => 'res-uuid-abc-123',
+        ];
+    }
+
+    public function testSignatureIsStableForTheSameEnvironment(): void
+    {
+        self::assertNotNull($this->identity($this->completeVars())->signature());
+        self::assertSame(
+            $this->identity($this->completeVars())->signature(),
+            $this->identity($this->completeVars())->signature(),
+        );
+    }
+
+    public function testSignatureChangesWhenAnIdentityVariableChanges(): void
+    {
+        $base = $this->identity($this->completeVars())->signature();
+
+        $rotatedUrl = $this->completeVars();
+        $rotatedUrl[EnvIdentity::PORTAL_API_URL] = 'https://other.pinner.test';
+
+        self::assertNotSame($base, $this->identity($rotatedUrl)->signature());
+    }
+
+    public function testSignatureChangesWhenAnOptionalIdentityVariableChanges(): void
+    {
+        $base = $this->identity($this->completeVars())->signature();
+
+        $changedUuid = $this->completeVars();
+        $changedUuid[EnvIdentity::COOLIFY_RESOURCE_UUID] = 'res-uuid-other-456';
+
+        self::assertNotSame($base, $this->identity($changedUuid)->signature());
+    }
+
+    public function testSignatureChangesWhenACredentialChangesUnderTheSamePepper(): void
+    {
+        // The digest is a keyed HMAC (the pepper comes from wp-config's salt,
+        // never the database), so a DB-only reader has no verifiable offline
+        // brute-force target, and a credential rotation still produces a
+        // different signature — the memo goes stale on rotation, exactly what
+        // the resolver's invalidation needs.
+        $base = $this->identity($this->completeVars())->signature('site-pepper');
+        self::assertNotNull($base);
+
+        $rotatedKey = $this->completeVars();
+        $rotatedKey[EnvIdentity::PORTAL_API_KEY] = 'rotated-account-key';
+        $rotatedPassword = $this->completeVars();
+        $rotatedPassword[EnvIdentity::WORKSPACE_AUTH_PASSWORD] = 'other-workspace-pass';
+
+        self::assertNotSame($base, $this->identity($rotatedKey)->signature('site-pepper'));
+        self::assertNotSame($base, $this->identity($rotatedPassword)->signature('site-pepper'));
+    }
+
+    public function testSignatureIsPepperBound(): void
+    {
+        self::assertNotNull($this->identity($this->completeVars())->signature('site-pepper'));
+        self::assertSame(
+            $this->identity($this->completeVars())->signature('site-pepper'),
+            $this->identity($this->completeVars())->signature('site-pepper'),
+        );
+        self::assertNotSame(
+            $this->identity($this->completeVars())->signature('site-pepper'),
+            $this->identity($this->completeVars())->signature('other-site-pepper'),
+        );
+    }
+
+    public function testSignatureIsNotAPlainCredentialHash(): void
+    {
+        // The digest must not be reproducible without the pepper: assert it
+        // is NOT the unsalted sha256 of the credential or of raw parts.
+        $vars = $this->completeVars();
+        $signature = (string) $this->identity($vars)->signature('site-pepper');
+
+        self::assertNotSame(
+            hash('sha256', 'rotated-account-key'),
+            $this->identity(array_merge($vars, [EnvIdentity::PORTAL_API_KEY => 'rotated-account-key']))->signature('site-pepper'),
+        );
+        self::assertNotSame(
+            hash('sha256', urlencode('secret-account-key')),
+            $this->identity($vars)->signature('site-pepper'),
+        );
+        self::assertSame(64, strlen($signature));
+    }
+
+    public function testSignatureStillTracksAccountDistinguishingVariables(): void
+    {
+        $base = $this->identity($this->completeVars())->signature();
+
+        $changedUsername = $this->completeVars();
+        $changedUsername[EnvIdentity::WORKSPACE_AUTH_USERNAME] = 'other-operator';
+        $changedWorkspaceUrl = $this->completeVars();
+        $changedWorkspaceUrl[EnvIdentity::PORTAL_WORKSPACE_URL] = 'https://elsewhere.example.test';
+
+        self::assertNotSame($base, $this->identity($changedUsername)->signature());
+        self::assertNotSame($base, $this->identity($changedWorkspaceUrl)->signature());
+    }
+
+    public function testSignatureIsValueFree(): void
+    {
+        $signature = (string) $this->identity($this->completeVars())->signature();
+
+        self::assertSame(64, strlen($signature));
+        self::assertStringNotContainsString('secret-account-key', $signature);
+        self::assertStringNotContainsString('pinner.xyz', $signature);
+        self::assertStringNotContainsString('operator', $signature);
+    }
+
+    public function testSignatureIsNullWhenTheIdentityIsIncomplete(): void
+    {
+        self::assertNull($this->identity([EnvIdentity::PORTAL_API_URL => 'https://pinner.xyz'])->signature());
+    }
+
     public function testReadsCompleteIdentityFromEnvironment(): void
     {
         $identity = $this->identity([

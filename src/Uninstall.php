@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LumeWeb\Cast;
 
 use ComposePress\Core\PluginUninstall;
+use LumeWeb\Cast\Admin\PortalConnectionResolver;
 use LumeWeb\Cast\Admin\WordPressPermalinkSettings;
 use LumeWeb\Cast\Export\RetentionPolicy;
 use LumeWeb\Cast\Export\WordPressPackEnvironment;
@@ -41,6 +42,7 @@ final class Uninstall implements PluginUninstall
         delete_option(WordPressPermalinkSettings::FLUSH_FLAG_OPTION);
         delete_option(RetentionPolicy::OPTION);
         delete_option(WordPressPackEnvironment::VALIDATION_MODE_OPTION);
+        delete_transient(PortalConnectionResolver::CACHE_KEY);
 
         // Each lock is one `cast_lease_*` option row; the keys are dynamic, so
         // they are swept by prefix instead of named. esc_like() keeps the

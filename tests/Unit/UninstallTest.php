@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LumeWeb\Cast\Tests\Unit;
 
+use LumeWeb\Cast\Admin\PortalConnectionResolver;
 use LumeWeb\Cast\Uninstall;
 use PHPUnit\Framework\TestCase;
 
@@ -55,6 +56,19 @@ final class UninstallTest extends TestCase
         Uninstall::uninstall();
 
         self::assertSame([], $GLOBALS['lumeweb_cast_options']);
+    }
+
+    public function testUninstallRemovesTheConnectionMemoTransient(): void
+    {
+        $GLOBALS['lumeweb_cast_transients_deleted'] = [];
+
+        Uninstall::uninstall();
+
+        self::assertContains(
+            PortalConnectionResolver::CACHE_KEY,
+            $GLOBALS['lumeweb_cast_transients_deleted'],
+            'uninstall must remove the cross-request connection memo transient',
+        );
     }
 
     public function testUninstallSweepsLockLeaseRowsByPrefix(): void

@@ -127,6 +127,55 @@ final class EnvIdentity
             return null;
         }
 
+        [$url, $key, $workspaceAuth, $workspaceUrl, $resourceUuid] = $this->identityComponents();
+
+        return new PortalIdentity($url, $key, $workspaceAuth, $workspaceUrl, $resourceUuid);
+    }
+
+    /**
+     * A value-free keyed digest of the whole deployment identity, or null
+     * when the identity is incomplete (there is no identity to key on).
+     *
+     * Memoization stores use it as a cache-miss signature: a memo written
+     * under one deployment identity must never be served to a request whose
+     * identity changed (credential rotation, re-pointed portal base,
+     * different workspace), so the consumer compares this digest alongside
+     * the cached value.
+     *
+     * The digest is an HMAC over the component values with $pepper as its
+     * key, and the pepper must come from a secret that is never persisted in
+     * the database (wp_salt): a DB-only reader then holds a keyed digest it
+     * cannot verify guesses against, so credentials gain no offline
+     * brute-force target, while a rotation under an unchanged pepper still
+     * changes the digest and staleness rules.
+     *
+     * The digest never carries or reveals the values themselves.
+     */
+    public function signature(string $pepper = ''): ?string
+    {
+        if (!$this->isComplete()) {
+            return null;
+        }
+
+        [$url, $key, $workspaceAuth, $workspaceUrl, $resourceUuid] = $this->identityComponents();
+
+        return hash_hmac('sha256', implode("\0", [
+            $url,
+            $key,
+            $workspaceUrl ?? '',
+            $resourceUuid ?? '',
+            $workspaceAuth?->username() ?? '',
+            $workspaceAuth?->password() ?? '',
+        ]), $pepper);
+    }
+
+    /**
+     * The identity components, extracted exactly as resolve() assembles them.
+     *
+     * @return array{0:string,1:string,2:?WorkspaceAuth,3:?string,4:?string}
+     */
+    private function identityComponents(): array
+    {
         $url = (string) $this->env->get(self::PORTAL_API_URL);
         $key = trim((string) $this->env->get(self::PORTAL_API_KEY));
 
@@ -139,13 +188,13 @@ final class EnvIdentity
         $workspaceUrl = $this->nonEmpty(self::PORTAL_WORKSPACE_URL);
         $resourceUuid = $this->nonEmpty(self::COOLIFY_RESOURCE_UUID);
 
-        return new PortalIdentity(
+        return [
             self::normalizedPortalBaseUrl($url) ?? $url,
             $key,
             $workspaceAuth,
             $workspaceUrl,
             $resourceUuid,
-        );
+        ];
     }
 
     /**

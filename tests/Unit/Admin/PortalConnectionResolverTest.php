@@ -72,6 +72,95 @@ final class PortalConnectionResolverTest extends TestCase
      * The POST /api/auth/key success response that exchanges the workspace API
      * key for the login-purpose auth key account.pinner.xyz accepts.
      */
+    public function testSignatureChangeTreatsTheMemoAsAMiss(): void
+    {
+        // A memo written under one deployment identity must never serve a
+        // request whose identity changed (credential rotation, re-pointed
+        // portal base): the wrong identity would silently answer the
+        // Connection card and every state-gated publish action.
+        $gateway = new FakeTransientGateway();
+        $booted = new PortalConnectionResolver(
+            $this->completeIdentity(),
+            RecordingTransport::withResponses([
+                $this->exchangeResponse(),
+                new Response(200, [], $this->accountJson()),
+                new Response(200, [], $this->resolveJson()),
+            ])->transport(),
+            $gateway,
+            'site-pepper',
+        );
+        $before = $booted->current();
+        self::assertNotNull($before);
+        self::assertSame('a@b.test', $before->account()?->email());
+
+        // A key rotation under the same site pepper is exactly the change
+        // the keyed digest must catch: the memo written under the old key is
+        // a miss, and the fresh resolve answers with the new account's data.
+        $rotatedRecording = RecordingTransport::withResponses([
+            $this->exchangeResponse(),
+            new Response(200, [], $this->accountJson()),
+            new Response(200, [], $this->resolveJson()),
+        ]);
+        $afterRotation = new PortalConnectionResolver(
+            $this->identity([
+                EnvIdentity::PORTAL_API_URL => self::BASE_URL,
+                EnvIdentity::PORTAL_API_KEY => 'rotated-account-key-abc',
+                EnvIdentity::COOLIFY_RESOURCE_UUID => self::RESOURCE_UUID,
+            ]),
+            $rotatedRecording->transport(),
+            $gateway,
+            'site-pepper',
+        );
+
+        $self = $afterRotation->current();
+
+        self::assertNotNull($self);
+        self::assertTrue($self->isResolved());
+        self::assertCount(
+            3,
+            $rotatedRecording->requests(),
+            'A memo written under a rotated credential must be a miss, never a silent stale answer.',
+        );
+    }
+
+    public function testMissingPepperFailsClosedAndDisablesTheMemo(): void
+    {
+        // Without a trusted pepper (no AUTH_SALT constant, no env override)
+        // the identity digest would be verifiable by a DB-only attacker, so
+        // the memo must not be written at all — per-request memoization only.
+        $gateway = new FakeTransientGateway();
+        $recording = RecordingTransport::withResponses([
+            $this->exchangeResponse(),
+            new Response(200, [], $this->accountJson()),
+            new Response(200, [], $this->resolveJson()),
+        ]);
+        $first = new PortalConnectionResolver($this->completeIdentity(), $recording->transport(), $gateway, '');
+
+        $self = $first->current();
+        self::assertNotNull($self);
+        self::assertTrue($self->isResolved());
+        self::assertCount(3, $recording->requests());
+        self::assertNull($gateway->get('cast_self_identification', null), 'no trusted pepper must never persist a digest');
+
+        // A second instance (the next request) cannot reap the memo either:
+        // it pays the exchange again instead of reading an unkeyed digest.
+        $second = new PortalConnectionResolver(
+            $this->completeIdentity(),
+            RecordingTransport::withResponses([
+                $this->exchangeResponse(),
+                new Response(200, [], $this->accountJson()),
+                new Response(200, [], $this->resolveJson()),
+            ])->transport(),
+            $gateway,
+            '',
+        );
+        $again = $second->current();
+
+        self::assertNotNull($again);
+        self::assertTrue($again->isResolved());
+        self::assertNull($gateway->get('cast_self_identification', null));
+    }
+
     public function testUnresolvedStateIsNotCachedAcrossRequests(): void
     {
         // Empty MockHandler queue: the resolution fails into the safe error
@@ -94,18 +183,20 @@ final class PortalConnectionResolverTest extends TestCase
             new Response(200, [], $this->resolveJson()),
         ]);
         $gateway = new FakeTransientGateway();
-        $first = new PortalConnectionResolver($this->completeIdentity(), $recording->transport(), $gateway);
+        $first = new PortalConnectionResolver($this->completeIdentity(), $recording->transport(), $gateway, 'site-pepper');
 
         $self = $first->current();
         self::assertNotNull($self);
         self::assertTrue($self->isResolved());
         self::assertCount(3, $recording->requests());
-        self::assertInstanceOf(SelfIdentification::class, $gateway->get(self::CACHE_KEY, null));
+        $memo = $gateway->get(self::CACHE_KEY, null);
+        self::assertIsArray($memo);
+        self::assertInstanceOf(SelfIdentification::class, $memo['self'] ?? null);
 
         // A second resolver instance (the next request) reads the cached
         // identification instead of paying the portal exchange again.
         $emptyRecording = RecordingTransport::withResponses([]);
-        $second = new PortalConnectionResolver($this->completeIdentity(), $emptyRecording->transport(), $gateway);
+        $second = new PortalConnectionResolver($this->completeIdentity(), $emptyRecording->transport(), $gateway, 'site-pepper');
 
         $again = $second->current();
 
