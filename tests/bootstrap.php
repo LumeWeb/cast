@@ -928,6 +928,8 @@ $GLOBALS['lumeweb_cast_wpdb_rows'] = [];
 $GLOBALS['wpdb'] = new class {
     public string $prefix = 'wptests_';
 
+    public string $options = 'wptests_options';
+
     // Snake_case method names mirror the real wpdb API surface; PSR-1's
     // camel-caps rule intentionally exempts them.
     // phpcs:disable PSR1.Methods.CamelCapsMethodName
@@ -935,6 +937,11 @@ $GLOBALS['wpdb'] = new class {
     public function get_charset_collate(): string
     {
         return 'DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci';
+    }
+
+    public function esc_like(string $text): string
+    {
+        return addcslashes($text, '_%\\');
     }
 
     public function prepare(string $query, mixed ...$args): string

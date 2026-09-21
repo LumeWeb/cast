@@ -73,6 +73,7 @@ use LumeWeb\Cast\Persistence\CastExportItemsTable;
 use LumeWeb\Cast\Persistence\SqlWorkItemRepository;
 use LumeWeb\Cast\Persistence\WordPressOptionGateway;
 use LumeWeb\Cast\Persistence\WordPressRunRepository;
+use LumeWeb\Cast\Persistence\WordPressTransientGateway;
 use LumeWeb\Cast\Persistence\WordPressWizardStore;
 use LumeWeb\Cast\Persistence\WordPressWpDbGateway;
 use LumeWeb\Cast\Publish\IpfsDomainClient;
@@ -259,8 +260,14 @@ final class CastPlugin
         // self-identification LAZILY through PortalConnectionResolver — never
         // during this boot (a plain boot performs no portal request). With an
         // incomplete deployment env the resolver short-circuits to a safe
-        // value-free problem state without touching the transport.
-        $connectionResolver = new PortalConnectionResolver($deploymentEnv, $transport);
+        // value-free problem state without touching the transport. The
+        // transient memo keeps the always-rendering admin bar's status reads
+        // from paying the portal exchange on every page load.
+        $connectionResolver = new PortalConnectionResolver(
+            $deploymentEnv,
+            $transport,
+            new WordPressTransientGateway(),
+        );
         // The domain-setup REST surface also needs the portal identity (its SDK
         // domain client requires a base URL + bearer API key), so it is only
         // composed inside the same guard and stays null — leaving the routes

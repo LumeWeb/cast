@@ -8,6 +8,8 @@ use GuzzleHttp\Psr7\Response;
 use LumeWeb\Cast\Admin\PortalConnectionResolver;
 use LumeWeb\Cast\Environment\EnvIdentity;
 use LumeWeb\Cast\Environment\EnvReader;
+use LumeWeb\Cast\Persistence\TransientGateway;
+use LumeWeb\Cast\Portal\SelfIdentification;
 use LumeWeb\Cast\Tests\Unit\Support\RecordingTransport;
 use PHPUnit\Framework\TestCase;
 
@@ -64,10 +66,54 @@ final class PortalConnectionResolverTest extends TestCase
 
     private const AUTH_KEY = 'exchanged-auth-key-resolver-99c8';
 
+    private const CACHE_KEY = 'cast_self_identification';
+
     /**
      * The POST /api/auth/key success response that exchanges the workspace API
      * key for the login-purpose auth key account.pinner.xyz accepts.
      */
+    public function testUnresolvedStateIsNotCachedAcrossRequests(): void
+    {
+        // Empty MockHandler queue: the resolution fails into the safe error
+        // state, which must NOT be written to the transient gateway — an error
+        // pinned for the whole TTL would mask a portal recovery.
+        $recording = RecordingTransport::withResponses([]);
+        $gateway = new FakeTransientGateway();
+        $resolver = new PortalConnectionResolver($this->completeIdentity(), $recording->transport(), $gateway);
+
+        $resolver->current();
+
+        self::assertNull($gateway->get(self::CACHE_KEY, null));
+    }
+
+    public function testResolvedIdentityIsMemoizedInTransientAndReusedAcrossInstances(): void
+    {
+        $recording = RecordingTransport::withResponses([
+            $this->exchangeResponse(),
+            new Response(200, [], $this->accountJson()),
+            new Response(200, [], $this->resolveJson()),
+        ]);
+        $gateway = new FakeTransientGateway();
+        $first = new PortalConnectionResolver($this->completeIdentity(), $recording->transport(), $gateway);
+
+        $self = $first->current();
+        self::assertNotNull($self);
+        self::assertTrue($self->isResolved());
+        self::assertCount(3, $recording->requests());
+        self::assertInstanceOf(SelfIdentification::class, $gateway->get(self::CACHE_KEY, null));
+
+        // A second resolver instance (the next request) reads the cached
+        // identification instead of paying the portal exchange again.
+        $emptyRecording = RecordingTransport::withResponses([]);
+        $second = new PortalConnectionResolver($this->completeIdentity(), $emptyRecording->transport(), $gateway);
+
+        $again = $second->current();
+
+        self::assertNotNull($again);
+        self::assertSame('a@b.test', $again->account()?->email());
+        self::assertSame([], $emptyRecording->requests(), 'a cached resolution must not hit the transport');
+    }
+
     private function exchangeResponse(): Response
     {
         return new Response(200, ['Content-Type' => 'application/json'], '{"token":"' . self::AUTH_KEY . '"}');
@@ -146,5 +192,21 @@ final class PortalConnectionResolverTest extends TestCase
         self::assertFalse($self->isResolved());
         self::assertNotNull($self->error());
         self::assertStringNotContainsString(self::SECRET_KEY, (string) $self->error());
+    }
+}
+
+final class FakeTransientGateway implements TransientGateway
+{
+    /** @var array<string, mixed> */
+    private array $store = [];
+
+    public function get(string $key, mixed $default): mixed
+    {
+        return $this->store[$key] ?? $default;
+    }
+
+    public function set(string $key, mixed $value, int $ttlSeconds): void
+    {
+        $this->store[$key] = $value;
     }
 }

@@ -16,7 +16,13 @@ namespace LumeWeb\Cast\Admin;
 final class WordPressPermalinkSettings implements PermalinkSettings
 {
     private const OPTION_STRUCTURE = 'permalink_structure';
-    private const FLUSH_FLAG_OPTION = 'cast_permalink_structure_flushed';
+
+    /**
+     * Public so the uninstaller can remove the flag together with the other
+     * plugin-owned options; a surviving flag would make a fresh reinstall
+     * skip its one-time hard flush and leave plain permalinks unflushed.
+     */
+    public const FLUSH_FLAG_OPTION = 'cast_permalink_structure_flushed';
 
     public function structure(): string
     {
