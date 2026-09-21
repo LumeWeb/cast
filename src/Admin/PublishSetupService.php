@@ -721,7 +721,6 @@ final class PublishSetupService
             websiteId: (string) $website->id(),
             websiteName: $name,
             domain: $website->domain(),
-            status: $website->status(),
         );
     }
 
