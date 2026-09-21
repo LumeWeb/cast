@@ -16,7 +16,7 @@ use LumeWeb\Cast\Onboarding\WizardService;
  * the posted action before any state is touched. Building the wizard state is
  * delegated to WizardService, which additionally enforces the catalog allowlist
  * (selectBuilder) and Finite transition legality for every mutation. Invalid
- * builder selections and gate failures are denied (403); otherwise the request
+ * builder selections and check failures are denied (403); otherwise the request
  * redirects back to the admin page. Deny/redirect are delegated to the
  * RequestContext so this policy is testable and never skipped.
  */
@@ -88,7 +88,7 @@ final class OnboardingRequestHandler
     }
 
     /**
-     * Shared gate: capability + nonce, then the mutation, then a redirect.
+     * Shared check: capability + nonce, then the mutation, then a redirect.
      * Invalid builder selections (not on the allowlist) are denied, never
      * recorded.
      *
