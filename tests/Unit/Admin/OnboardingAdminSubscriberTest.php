@@ -795,7 +795,7 @@ final class OnboardingAdminSubscriberTest extends TestCase
     }
 
     /**
-     * The dashboard welcome-panel callback output, or '' when gated off.
+     * The dashboard welcome-panel callback output, or '' when suppressed.
      */
     private function renderDashboardWelcome(): string
     {

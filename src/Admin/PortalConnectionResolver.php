@@ -8,6 +8,7 @@ use LumeWeb\Cast\Environment\EnvIdentity;
 use LumeWeb\Cast\Environment\PortalIdentity;
 use LumeWeb\Cast\Http\HttpException;
 use LumeWeb\Cast\Http\HttpTransport;
+use LumeWeb\Cast\Persistence\TransientGateway;
 use LumeWeb\Cast\Portal\PortalFacade;
 use LumeWeb\Cast\Portal\SelfIdentification;
 
@@ -22,9 +23,21 @@ use LumeWeb\Cast\Portal\SelfIdentification;
  * transport blow-up is absorbed into the same safe unreachable state. The
  * result is cached per instance, so a single request resolves the connection
  * at most once even when status is read repeatedly.
+ *
+ * The resolved identity is additionally memoized across requests through the
+ * optional {@see TransientGateway} (short TTL), because surfaces like the
+ * always-rendering admin bar read status on every page load: without the
+ * cross-request memo each page view would pay the full three-call exchange.
+ * Only a fully resolved (healthy) identification is written to the transient
+ * — error states are recomputed on demand instead of being pinned for the
+ * whole TTL — so a transient failure surfaces once the next request refetches.
  */
 final class PortalConnectionResolver implements ConnectionResolver
 {
+    private const CACHE_KEY = 'cast_self_identification';
+
+    private const CACHE_TTL_SECONDS = 300;
+
     private ?SelfIdentification $cached = null;
 
     private bool $resolved = false;
@@ -32,6 +45,7 @@ final class PortalConnectionResolver implements ConnectionResolver
     public function __construct(
         private readonly EnvIdentity $identity,
         private readonly HttpTransport $transport,
+        private readonly ?TransientGateway $cache = null,
     ) {
     }
 
@@ -39,6 +53,16 @@ final class PortalConnectionResolver implements ConnectionResolver
     {
         if ($this->resolved) {
             return $this->cached;
+        }
+
+        if ($this->cache !== null) {
+            $hit = $this->cache->get(self::CACHE_KEY, null);
+            if ($hit instanceof SelfIdentification) {
+                $this->cached = $hit;
+                $this->resolved = true;
+
+                return $hit;
+            }
         }
 
         try {
@@ -51,6 +75,10 @@ final class PortalConnectionResolver implements ConnectionResolver
             $identity = $this->identity->resolve()
                 ?? new PortalIdentity('', '');
             $self = SelfIdentification::unreachable($identity);
+        }
+
+        if ($this->cache !== null && $self->isResolved()) {
+            $this->cache->set(self::CACHE_KEY, $self, self::CACHE_TTL_SECONDS);
         }
 
         $this->cached = $self;
