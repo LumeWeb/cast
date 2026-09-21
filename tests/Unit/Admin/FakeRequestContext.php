@@ -7,7 +7,7 @@ namespace LumeWeb\Cast\Tests\Unit\Admin;
 use LumeWeb\Cast\Admin\RequestContext;
 
 /**
- * Test double for RequestContext that records every gate/response call so the
+ * Test double for RequestContext that records every check/response call so the
  * handler's authorization policy is exercised without a web request.
  */
 final class FakeRequestContext implements RequestContext
@@ -74,5 +74,10 @@ final class FakeRequestContext implements RequestContext
     public function redirectToAdminPage(string $pageSlug): void
     {
         $this->redirects[] = $pageSlug;
+    }
+
+    public function redirectBack(string $fallbackUrl = ''): void
+    {
+        $this->redirects[] = 'back:' . $fallbackUrl;
     }
 }

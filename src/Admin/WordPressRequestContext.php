@@ -75,4 +75,16 @@ final class WordPressRequestContext implements RequestContext
         wp_safe_redirect(admin_url('admin.php?page=' . rawurlencode($pageSlug)));
         exit;
     }
+
+    public function redirectBack(string $fallbackUrl = ''): void
+    {
+        $referer = wp_get_referer();
+        $target = is_string($referer) && $referer !== '' ? $referer : $fallbackUrl;
+        if ($target === '') {
+            $target = admin_url();
+        }
+
+        wp_safe_redirect($target);
+        exit;
+    }
 }
