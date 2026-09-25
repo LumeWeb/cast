@@ -111,6 +111,13 @@ final class CastPlugin
         }
         self::$booted = true;
 
+        // Runtime schema migration runs on every boot, before anything can
+        // touch the custom tables: the platform deployment path swaps updated
+        // plugin files under an already-active install, so the activation hook
+        // (the only other schema installer) never re-runs for them. See
+        // {@see SchemaUpgrader}.
+        (new SchemaUpgrader(self::VERSION))->upgrade();
+
 
         // First-run onboarding: one global wizard aggregate persisted in the
         // non-autoloaded `cast_onboarding` option (no per-user user-meta) and
