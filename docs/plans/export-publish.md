@@ -232,7 +232,7 @@ Core conversion:
 
 Content handlers:
 
-- **HTML:** preserve scripts, comments, `<xmp>`, SVG data URIs, conditional comments and attribute entities before DOM parsing; repair HTML5 container issues around DOMDocument. Rewrite the full filterable tag map (`href/src/srcset/imagesrcset/poster/action/formaction/data-*`, iframe/embed/object/media/SVG/use/image, inline style). Restore preserved blocks after serialization.
+- **HTML:** parse and serialize with an HTML5 parser, then rewrite the full filterable tag map (`href/src/srcset/imagesrcset/poster/action/formaction/data-*`, iframe/embed/object/media/SVG/use/image, inline style). Serialization details such as quote style, entity representation and implied HTML5 structure are not an export contract; functional offline URL rewriting and policy are.
 - **srcset:** descriptor-aware splitter that does not split Cloudinary transform commas; rewrite each local candidate while preserving `800w`/`2x`.
 - **CSS:** rewrite `url()` and quoted/URL `@import`, skip data URIs, resolve against the CSS file URL; preserve quote style. Convert Elementor numeric HTML-entity icon content to CSS escapes.
 - **JS / JSON-in-script:** rewrite absolute, protocol-relative, root-relative known WP asset paths, JSON-escaped URLs, import-map keys/values, sourceMappingURL/sourceURL. Decode valid JSON, walk URL-looking values/keys where applicable, re-encode valid JSON; regex is fallback. HTML and JS use the same destination mode.

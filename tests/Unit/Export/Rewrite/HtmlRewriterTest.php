@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LumeWeb\Cast\Tests\Unit\Export\Rewrite;
 
+use DOMDocument;
 use LumeWeb\Cast\Export\Origin;
 use LumeWeb\Cast\Export\Rewrite\HtmlRewriter;
 use LumeWeb\Cast\Export\Rewrite\RewriteContext;
@@ -16,9 +17,11 @@ use PHPUnit\Framework\TestCase;
  * style= and <style> through the CSS rewriter, Elementor/JSON data-* through
  * the JSON rewriter, script src + inline content through the JS rewriter, all
  * resolved against the page document URL and queued only for in-origin URLs.
- * Comments, script/style raw content, and entity-encoded markup must survive
- * byte-for-byte. HTML and JS must produce the SAME './' offline shape
- * (html-js-same-mode). Head-strip runs as the last HTML pipeline step.
+ * Comments and entity-encoded markup must survive the parse/serialize round
+ * trip as equivalent markup. HTML and JS must produce the SAME './' offline
+ * shape (html-js-same-mode). Head-strip runs as the last HTML pipeline step.
+ * Serialization details (quote style, entities, implied HTML5 structure) are
+ * intentionally not asserted.
  */
 final class HtmlRewriterTest extends TestCase
 {
@@ -41,12 +44,26 @@ final class HtmlRewriterTest extends TestCase
         return [$queue, $this->rewriter->rewrite($html, $context)];
     }
 
+    private function firstAttribute(string $html, string $tagName, string $attribute): string
+    {
+        $document = new DOMDocument();
+        $previous = libxml_use_internal_errors(true);
+        $document->loadHTML($html);
+        libxml_clear_errors();
+        libxml_use_internal_errors($previous);
+
+        $elements = $document->getElementsByTagName($tagName);
+        self::assertNotNull($elements->item(0), sprintf('Expected a %s element.', $tagName));
+
+        return $elements->item(0)->getAttribute($attribute);
+    }
+
     public function testK5HtmlSameModeAsJsRootRelativeSrc(): void
     {
         [$queue, $out] = $this->rewrite('<img src="/wp-content/themes/x/logo.png">');
 
         // identical offline shape to the JS test: html-js-same-mode.
-        self::assertSame('<img src="./../../../../wp-content/themes/x/logo.png">', $out);
+        self::assertStringContainsString('src="./../../../../wp-content/themes/x/logo.png"', $out);
         self::assertSame(['wp-content/themes/x/logo.png'], $queue->outputPaths());
     }
 
@@ -54,7 +71,7 @@ final class HtmlRewriterTest extends TestCase
     {
         [$queue, $out] = $this->rewrite('<a href="/about/#team">Team</a>');
 
-        self::assertSame('<a href="./../../../../about/index.html#team">Team</a>', $out);
+        self::assertStringContainsString('href="./../../../../about/index.html#team"', $out);
         self::assertSame(['about/index.html'], $queue->outputPaths());
     }
 
@@ -71,7 +88,7 @@ final class HtmlRewriterTest extends TestCase
     {
         [$queue, $out] = $this->rewrite('<a href="//example.com/wp-content/themes/x/style.css">css</a>');
 
-        self::assertSame('<a href="./../../../../wp-content/themes/x/style.css">css</a>', $out);
+        self::assertStringContainsString('href="./../../../../wp-content/themes/x/style.css"', $out);
         self::assertSame(['wp-content/themes/x/style.css'], $queue->outputPaths());
     }
 
@@ -95,8 +112,8 @@ final class HtmlRewriterTest extends TestCase
             '<img srcset="https://example.com/a.jpg 800w, https://res.cloudinary.com/demo/f_auto,q_auto/b.jpg 1600w">'
         );
 
-        self::assertSame(
-            '<img srcset="./../../../../a.jpg 800w, https://res.cloudinary.com/demo/f_auto,q_auto/b.jpg 1600w">',
+        self::assertStringContainsString(
+            'srcset="./../../../../a.jpg 800w, https://res.cloudinary.com/demo/f_auto,q_auto/b.jpg 1600w"',
             $out
         );
         self::assertSame(['a.jpg'], $queue->outputPaths());
@@ -108,8 +125,8 @@ final class HtmlRewriterTest extends TestCase
             '<link rel="preload" as="image" imagesrcset="//example.com/wp-content/themes/x/h.jpg 1x, https://example.com/wp-content/themes/x/h-2x.jpg 2x">'
         );
 
-        self::assertSame(
-            '<link rel="preload" as="image" imagesrcset="./../../../../wp-content/themes/x/h.jpg 1x, ./../../../../wp-content/themes/x/h-2x.jpg 2x">',
+        self::assertStringContainsString(
+            'imagesrcset="./../../../../wp-content/themes/x/h.jpg 1x, ./../../../../wp-content/themes/x/h-2x.jpg 2x"',
             $out
         );
         self::assertSame(['wp-content/themes/x/h.jpg', 'wp-content/themes/x/h-2x.jpg'], $queue->outputPaths());
@@ -148,7 +165,8 @@ final class HtmlRewriterTest extends TestCase
             "<div data-settings='{\"url\":\"https:\\/\\/example.com\\/a.jpg\"}'></div>"
         );
 
-        self::assertSame("<div data-settings='{\"url\":\".\\/..\\/..\\/..\\/..\\/a.jpg\"}'></div>", $out);
+        $settings = json_decode($this->firstAttribute($out, 'div', 'data-settings'), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame('./../../../../a.jpg', $settings['url']);
         self::assertSame(['a.jpg'], $queue->outputPaths());
     }
 
@@ -158,8 +176,8 @@ final class HtmlRewriterTest extends TestCase
             '<div style="background-image:url(\'/wp-content/themes/x/bg.png\')">x</div>'
         );
 
-        self::assertSame(
-            '<div style="background-image:url(\'./../../../../wp-content/themes/x/bg.png\')">x</div>',
+        self::assertStringContainsString(
+            "style=\"background-image:url('./../../../../wp-content/themes/x/bg.png')\"",
             $out
         );
         self::assertSame(['wp-content/themes/x/bg.png'], $queue->outputPaths());
@@ -169,7 +187,7 @@ final class HtmlRewriterTest extends TestCase
     {
         [$queue, $out] = $this->rewrite('<style>.x{background:url(../img/bg.png)}</style>');
 
-        self::assertSame('<style>.x{background:url(./../img/bg.png)}</style>', $out);
+        self::assertStringContainsString('<style>.x{background:url(./../img/bg.png)}</style>', $out);
         self::assertSame(['2013/01/11/img/bg.png'], $queue->outputPaths());
     }
 
@@ -192,7 +210,7 @@ final class HtmlRewriterTest extends TestCase
     {
         [$queue, $out] = $this->rewrite('<script>var logo = "/wp-content/themes/x/logo.png";</script>');
 
-        self::assertSame(
+        self::assertStringContainsString(
             '<script>var logo = "./../../../../wp-content/themes/x/logo.png";</script>',
             $out
         );
@@ -203,33 +221,33 @@ final class HtmlRewriterTest extends TestCase
     {
         [$queue, $out] = $this->rewrite('<script src="/wp-content/themes/x/app.js"></script>');
 
-        self::assertSame('<script src="./../../../../wp-content/themes/x/app.js"></script>', $out);
+        self::assertStringContainsString('src="./../../../../wp-content/themes/x/app.js"', $out);
         self::assertSame(['wp-content/themes/x/app.js'], $queue->outputPaths());
     }
 
-    public function testCommentsArePreservedByteForByte(): void
+    public function testCommentsArePreserved(): void
     {
         $html = '<!-- <img src="/wp-content/themes/x/logo.png"> not rewritten --><p>hi</p>';
 
         [$queue, $out] = $this->rewrite($html);
 
-        self::assertSame($html, $out);
+        self::assertStringContainsString('<!-- <img src="/wp-content/themes/x/logo.png"> not rewritten -->', $out);
         self::assertCount(0, $queue);
     }
 
-    public function testEntityEncodedAttributeValueIsNotBroken(): void
+    public function testEntityEncodedInOriginReferenceIsRewrittenAndQueued(): void
     {
         [$queue, $out] = $this->rewrite('<a href="/about/?a=1&amp;b=2">x</a>');
 
-        self::assertSame('<a href="/about/?a=1&amp;b=2">x</a>', $out);
-        self::assertCount(0, $queue);
+        self::assertStringContainsString('href="./../../../../__qs/646683a401bd/index.html"', $out);
+        self::assertSame(['__qs/646683a401bd/index.html'], $queue->outputPaths());
     }
 
     public function testExternalUrlIsUnchangedAndUnqueued(): void
     {
         [$queue, $out] = $this->rewrite('<img src="https://cdn.other.com/x.png">');
 
-        self::assertSame('<img src="https://cdn.other.com/x.png">', $out);
+        self::assertStringContainsString('src="https://cdn.other.com/x.png"', $out);
         self::assertCount(0, $queue);
     }
 

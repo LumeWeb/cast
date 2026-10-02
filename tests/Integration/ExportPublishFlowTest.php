@@ -640,7 +640,8 @@ final class ExportPublishFlowTest extends TestCase
 
                     return [
                         'headers' => ['content-type' => 'text/html; charset=UTF-8'],
-                        'body' => str_repeat('p', 1024) . '<html><body>Integration probe page</body></html>',
+                        'body' => '<!DOCTYPE html><html><head><title>Integration probe page</title></head><body>'
+                            . str_repeat('p', 1024) . ' Integration probe page</body></html>',
                         'response' => ['code' => 200, 'message' => 'OK'],
                         'cookies' => [],
                         'filename' => null,
