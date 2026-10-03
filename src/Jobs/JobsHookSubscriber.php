@@ -99,7 +99,10 @@ final class JobsHookSubscriber implements HookSubscriber
     public function runTick(): void
     {
         $now = $this->clock->now();
-        $outcome = $this->tickRunner->tick($now);
+        // Deliberately unpinned: the runner reads the wall clock per unit so a
+        // batched tick stamps each unit with its real instant, while the
+        // captured $now above anchors the rearm and retention scheduling.
+        $outcome = $this->tickRunner->tick();
         $this->rearm($outcome, $now);
         $this->armRetention($outcome, $now);
     }

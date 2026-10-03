@@ -82,7 +82,9 @@ final class ExportTickRunnerTest extends TestCase
         $outcome = $this->runner->tick(at: 1001);
 
         self::assertSame(TickOutcomeKind::Ran, $outcome->kind);
-        self::assertSame(1, $this->tick->calls);
+        // Default config batches up to the item hard cap (fast units, frozen
+        // clock: the time budget never elapses).
+        self::assertSame(TickConfig::DEFAULT_UNITS_PER_TICK, $this->tick->calls);
         self::assertSame('run-1', $this->tick->lastRunId);
         self::assertSame(1001, $this->tick->lastNow);
         self::assertFalse($this->lock->isHeld(self::LOCK_KEY));
@@ -138,7 +140,7 @@ final class ExportTickRunnerTest extends TestCase
         $outcome = $this->runner->tick(at: 1061);
 
         self::assertSame(TickOutcomeKind::Ran, $outcome->kind);
-        self::assertSame(1, $this->tick->calls);
+        self::assertSame(TickConfig::DEFAULT_UNITS_PER_TICK, $this->tick->calls);
         self::assertFalse($this->lock->isHeld(self::LOCK_KEY));
     }
 
@@ -157,7 +159,7 @@ final class ExportTickRunnerTest extends TestCase
         $outcome = $this->runner->tick(at: 1061);
 
         self::assertSame(TickOutcomeKind::Ran, $outcome->kind);
-        self::assertSame(1, $this->tick->calls);
+        self::assertSame(TickConfig::DEFAULT_UNITS_PER_TICK, $this->tick->calls);
         self::assertFalse($this->lock->isHeld(self::LOCK_KEY));
     }
 
@@ -211,7 +213,7 @@ final class ExportTickRunnerTest extends TestCase
         $outcome = $this->runner->tick(at: 1001);
 
         self::assertSame(TickOutcomeKind::Ran, $outcome->kind);
-        self::assertSame(1, $this->tick->calls);
+        self::assertSame(TickConfig::DEFAULT_UNITS_PER_TICK, $this->tick->calls);
         self::assertSame(RunStatus::Running, $this->repository->latest()?->status);
     }
 
@@ -337,6 +339,241 @@ final class ExportTickRunnerTest extends TestCase
         }
 
         self::assertFalse($this->lock->isHeld(self::LOCK_KEY));
+    }
+
+    // ------------------------------------------------------------------
+    // Bounded batch of pipeline units per tick (Phase 1A).
+    // ------------------------------------------------------------------
+
+    public function testExplicitSingleUnitCapPreservesTheHistoricalSingleUnitTick(): void
+    {
+        // Operators that want the historical single-unit tick pin the item
+        // hard cap to 1 explicitly; the default now batches.
+        $this->runner = $this->makeRunner(new TickConfig(lockKey: self::LOCK_KEY, lockTtlSeconds: 60, unitsPerTick: 1));
+        $this->storePendingDirtyRun('run-1', 1000);
+        $this->tick->result = TickResult::more();
+
+        $outcome = $this->runner->tick(at: 1001);
+
+        self::assertSame(1, $this->tick->calls);
+        self::assertSame(TickOutcomeKind::Ran, $outcome->kind);
+        self::assertFalse($this->lock->isHeld(self::LOCK_KEY));
+    }
+
+    public function testDefaultConfigBatchesMultipleFastUnitsInOneTick(): void
+    {
+        // Production default must actually batch: an unconfigured TickConfig
+        // (time budget + item hard cap) over fast units runs the full item
+        // cap in one tick, persisting after every unit.
+        $counting = new SavingCountingRunRepository($this->repository);
+        $this->runner = new ExportTickRunner(
+            clock: $this->clock,
+            lock: $this->lock,
+            repository: $counting,
+            tick: $this->tick,
+            identity: $this->identity,
+            config: new TickConfig(lockKey: self::LOCK_KEY, lockTtlSeconds: 60),
+        );
+        $this->storePendingDirtyRun('run-1', 1000);
+        $this->tick->result = TickResult::more();
+
+        $outcome = $this->runner->tick(at: 1001);
+
+        self::assertSame(TickOutcomeKind::Ran, $outcome->kind);
+        // The documented production defaults: 20-item hard cap, 30s wall-clock
+        // budget — half the 60s lock TTL.
+        self::assertSame(20, TickConfig::DEFAULT_UNITS_PER_TICK);
+        self::assertSame(30, TickConfig::DEFAULT_TIME_BUDGET_SECONDS);
+        self::assertGreaterThan(1, $this->tick->calls);
+        self::assertSame(TickConfig::DEFAULT_UNITS_PER_TICK, $this->tick->calls);
+        // 1 auto-start save + one save per executed unit.
+        self::assertSame(TickConfig::DEFAULT_UNITS_PER_TICK + 1, $counting->saves);
+        self::assertFalse($this->lock->isHeld(self::LOCK_KEY));
+    }
+
+    public function testAdvancesNoNextUnitOnceTheElapsedTimeBudgetIsReached(): void
+    {
+        // The wall-clock time budget is the primary governor: with a generous
+        // item cap, one slow unit (e.g. a 30s HTTP capture) that consumes the
+        // whole time budget must NOT let a next unit start — that is what
+        // keeps a single tick inside the 60s lock TTL.
+        $this->runner = $this->makeRunner(new TickConfig(lockKey: self::LOCK_KEY, lockTtlSeconds: 60, unitsPerTick: 5));
+        $this->storePendingDirtyRun('run-1', 1000);
+        $this->tick->result = TickResult::more();
+        $this->tick->mutate = function (ExportRun $run): void {
+            $this->clock->advance(40); // one slow unit: past the 30s default time budget
+        };
+
+        $outcome = $this->runner->tick(at: 1001);
+
+        self::assertSame(1, $this->tick->calls);
+        self::assertSame(TickOutcomeKind::Ran, $outcome->kind);
+        self::assertSame(RunStatus::Running, $this->repository->latest()?->status);
+        self::assertFalse($this->lock->isHeld(self::LOCK_KEY));
+    }
+
+    public function testStopsTheBatchWhenTheElapsedTimeExactlyReachesTheBudget(): void
+    {
+        // Boundary: the budget is reached, not merely exceeded. A unit that
+        // consumes exactly the whole 30s default budget leaves no room for a
+        // next unit (the 30s capture fits the 60s lease with margin to spare).
+        $this->runner = $this->makeRunner(new TickConfig(lockKey: self::LOCK_KEY, lockTtlSeconds: 60, unitsPerTick: 5));
+        $this->storePendingDirtyRun('run-1', 1000);
+        $this->tick->result = TickResult::more();
+        $this->tick->mutate = function (ExportRun $run): void {
+            $this->clock->advance(30); // exactly the 30s default time budget
+        };
+
+        // at: 1000 pins the tick start to the clock itself so the elapsed
+        // time lands exactly on the 30s budget (deadline 1030).
+        $outcome = $this->runner->tick(at: 1000);
+
+        self::assertSame(1, $this->tick->calls);
+        self::assertSame(TickOutcomeKind::Ran, $outcome->kind);
+        self::assertSame(RunStatus::Running, $this->repository->latest()?->status);
+    }
+
+    public function testRunsBoundedBatchOfUnitsUpToTheBudgetInOneTick(): void
+    {
+        $counting = new SavingCountingRunRepository($this->repository);
+        $this->runner = new ExportTickRunner(
+            clock: $this->clock,
+            lock: $this->lock,
+            repository: $counting,
+            tick: $this->tick,
+            identity: $this->identity,
+            config: new TickConfig(lockKey: self::LOCK_KEY, lockTtlSeconds: 60, unitsPerTick: 3),
+        );
+        $this->storePendingDirtyRun('run-1', 1000);
+        $this->tick->result = TickResult::more();
+        $this->tick->mutate = static function (ExportRun $run): void {
+            $run->recordProgress($run->progressCount + 10, at: 1001);
+        };
+
+        $outcome = $this->runner->tick(at: 1001);
+
+        self::assertSame(3, $this->tick->calls);
+        self::assertSame(TickOutcomeKind::Ran, $outcome->kind);
+        $latest = $this->repository->latest();
+        self::assertNotNull($latest);
+        self::assertSame(RunStatus::Running, $latest->status);
+        // Every unit's mutation is persisted as it happens.
+        self::assertSame(30, $latest->progressCount);
+        // 1 auto-start save + one save per executed unit.
+        self::assertSame(4, $counting->saves);
+        self::assertFalse($this->lock->isHeld(self::LOCK_KEY));
+    }
+
+    public function testStopsAtTheUnitBudgetWithoutExceedingIt(): void
+    {
+        $this->runner = $this->makeRunner(new TickConfig(lockKey: self::LOCK_KEY, lockTtlSeconds: 60, unitsPerTick: 2));
+        $this->storePendingDirtyRun('run-1', 1000);
+        $this->tick->result = TickResult::more();
+
+        $outcome = $this->runner->tick(at: 1001);
+
+        self::assertSame(2, $this->tick->calls);
+        self::assertSame(TickOutcomeKind::Ran, $outcome->kind);
+        self::assertSame(RunStatus::Running, $this->repository->latest()?->status);
+    }
+
+    public function testStopsTheBatchAfterAFailureOutcomeWithRetriesRemaining(): void
+    {
+        $this->runner = $this->makeRunner(new TickConfig(lockKey: self::LOCK_KEY, lockTtlSeconds: 60, unitsPerTick: 4));
+        $this->storePendingDirtyRun('run-1', 1000);
+        $this->tick->results = [TickResult::more(), TickResult::fail('upload timed out')];
+
+        $outcome = $this->runner->tick(at: 1001);
+
+        self::assertSame(2, $this->tick->calls);
+        self::assertSame(TickOutcomeKind::Retried, $outcome->kind);
+        $latest = $this->repository->latest();
+        self::assertSame(RunStatus::Running, $latest?->status);
+        self::assertSame(1, $latest->retryCount);
+        self::assertSame('upload timed out', $latest->lastError);
+    }
+
+    public function testStopsTheBatchAfterAFinalFailureOutcome(): void
+    {
+        $this->runner = $this->makeRunner(new TickConfig(lockKey: self::LOCK_KEY, lockTtlSeconds: 60, unitsPerTick: 4));
+        $run = ExportRun::create('run-1', new RunSettings(hostname: 'blog.example.test', maxRetries: 0), at: 1000);
+        $run->markDirty(at: 1000);
+        $this->repository->save($run);
+        $this->tick->results = [TickResult::more(), TickResult::fail('disk full')];
+
+        $outcome = $this->runner->tick(at: 1001);
+
+        self::assertSame(2, $this->tick->calls);
+        self::assertSame(TickOutcomeKind::Failed, $outcome->kind);
+        self::assertSame('disk full', $outcome->reason);
+        self::assertSame(RunStatus::Failed, $this->repository->latest()?->status);
+    }
+
+    public function testStopsTheBatchAfterAFinishedOutcome(): void
+    {
+        $this->runner = $this->makeRunner(new TickConfig(lockKey: self::LOCK_KEY, lockTtlSeconds: 60, unitsPerTick: 4));
+        $this->storePendingDirtyRun('run-1', 1000);
+        $this->tick->results = [TickResult::more(), TickResult::done()];
+        $this->tick->mutate = function (ExportRun $run): void {
+            if ($this->tick->calls >= 2) {
+                $run->complete(at: 1001);
+            }
+        };
+
+        $outcome = $this->runner->tick(at: 1001);
+
+        self::assertSame(2, $this->tick->calls);
+        self::assertSame(TickOutcomeKind::Completed, $outcome->kind);
+        self::assertSame(RunStatus::Completed, $this->repository->latest()?->status);
+    }
+
+    public function testStopsTheBatchAfterAStaleOutcome(): void
+    {
+        $this->runner = $this->makeRunner(new TickConfig(lockKey: self::LOCK_KEY, lockTtlSeconds: 60, unitsPerTick: 4));
+        $this->storePendingDirtyRun('run-1', 1000);
+        $this->tick->results = [TickResult::more(), TickResult::stale()];
+
+        $outcome = $this->runner->tick(at: 1001);
+
+        self::assertSame(2, $this->tick->calls);
+        self::assertSame(TickOutcomeKind::Watchdog, $outcome->kind);
+        self::assertSame(RunStatus::Running, $this->repository->latest()?->status);
+    }
+
+    public function testStopsTheBatchWhenTheRunBecomesPausedMidBatch(): void
+    {
+        $this->runner = $this->makeRunner(new TickConfig(lockKey: self::LOCK_KEY, lockTtlSeconds: 60, unitsPerTick: 4));
+        $this->storePendingDirtyRun('run-1', 1000);
+        $this->tick->results = [TickResult::more(), TickResult::more()];
+        $this->tick->mutate = function (ExportRun $run): void {
+            if ($this->tick->calls >= 2) {
+                $run->pause(at: 1001);
+            }
+        };
+
+        $outcome = $this->runner->tick(at: 1001);
+
+        self::assertSame(2, $this->tick->calls);
+        self::assertSame(TickOutcomeKind::Ran, $outcome->kind);
+        self::assertSame(RunStatus::Paused, $this->repository->latest()?->status);
+    }
+
+    public function testStopsTheBatchWhenTheRunBecomesTerminalMidBatch(): void
+    {
+        $this->runner = $this->makeRunner(new TickConfig(lockKey: self::LOCK_KEY, lockTtlSeconds: 60, unitsPerTick: 4));
+        $this->storePendingDirtyRun('run-1', 1000);
+        $this->tick->results = [TickResult::more(), TickResult::more()];
+        $this->tick->mutate = function (ExportRun $run): void {
+            if ($this->tick->calls >= 2) {
+                $run->cancel(at: 1001);
+            }
+        };
+
+        $outcome = $this->runner->tick(at: 1001);
+
+        self::assertSame(2, $this->tick->calls);
+        self::assertSame(TickOutcomeKind::Ran, $outcome->kind);
+        self::assertSame(RunStatus::Cancelled, $this->repository->latest()?->status);
     }
 
     public function testCancelsASupersededLiveRun(): void

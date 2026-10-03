@@ -106,7 +106,7 @@ final class CastPlugin
      */
     private static bool $booted = false;
 
-    public static function boot(string $pluginFile, ?HttpTransport $publishTransport = null): void
+    public static function boot(string $pluginFile, ?HttpTransport $publishTransport = null, ?TickConfig $exportTickConfig = null): void
     {
         if (self::$booted) {
             return;
@@ -508,7 +508,7 @@ final class CastPlugin
             repository: $repository,
             tick: new ExportPipelineTick($pipeline),
             identity: $identity,
-            config: new TickConfig(reclaimStaleLocks: true),
+            config: $exportTickConfig ?? new TickConfig(reclaimStaleLocks: true),
         );
         // The scheduler clears the shared work-item queue exactly when a new
         // run id is persisted (ensurePendingRun), so the fresh per-run work
