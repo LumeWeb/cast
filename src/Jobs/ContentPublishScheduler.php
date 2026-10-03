@@ -183,7 +183,9 @@ final class ContentPublishScheduler
      * identifiers (CID/website/IPNS) are carried over so the status surface
      * keeps reporting the last published state while the replay is queued.
      * Exactly one immediate AUTO_HOOK tick is scheduled; no follow-up is armed
-     * (single active run, single-run-slot semantics).
+     * (single active run, single-run-slot semantics). The source run's
+     * terminal queue rows are purged once the seeded run is persisted — and
+     * only the source's rows, so no other run is touched.
      */
     public function publishExisting(ExportRun $source, ?int $at = null): PublishNowResult
     {
@@ -204,6 +206,13 @@ final class ContentPublishScheduler
             $seeded->recordPublishIdentifiers($source->publishCid, $source->websiteId, $source->ipnsKey, at: $now);
         }
         $this->repository->create($seeded);
+
+        // This path bypasses ensurePendingRun, whose terminal queue-row purge
+        // is the only other place prior runs' rows are removed: purge the
+        // source run's slice now that the seeded replay run is persisted. Only
+        // the source id is listed — the seeded run's own (empty) slice and
+        // every other run are never touched.
+        $this->workItems->purgeTerminalRuns([$source->runId]);
 
         $this->scheduleImmediately($now);
 

@@ -7,6 +7,8 @@ namespace LumeWeb\Cast\Tests\Unit\Jobs;
 use LumeWeb\Cast\Export\ExportRun;
 use LumeWeb\Cast\Export\InMemoryRunRepository;
 use LumeWeb\Cast\Export\InMemoryWorkItemRepository;
+use LumeWeb\Cast\Export\PackResult;
+use LumeWeb\Cast\Export\PackStatus;
 use LumeWeb\Cast\Export\RunSettings;
 use LumeWeb\Cast\Export\RunStatus;
 use LumeWeb\Cast\Export\WorkItemFactory;
@@ -454,6 +456,77 @@ final class ContentPublishSchedulerTest extends TestCase
         self::assertSame(0, $workItems->countByStatus('run-superseded', WorkItemStatus::Queued), 'a superseded prior run loses its queue rows');
         self::assertSame(1, $workItems->countByStatus('run-live', WorkItemStatus::Queued), 'a live nonterminal run keeps its queue rows');
         self::assertSame(0, $workItems->pendingCount($freshId), 'the new run starts from an empty queue');
+    }
+
+    public function testPublishExistingReplayPurgesOnlyTheSourceRunsQueueSlice(): void
+    {
+        // publishExisting bypasses ensurePendingRun (it deletes the terminal
+        // source record itself and seeds the replay run directly), so the
+        // source run's queue slice is purged on that path — and no other
+        // run's slice is touched: no other run is purged and the brand-new
+        // seeded run is never cleared.
+        $workItems = new InMemoryWorkItemRepository();
+        $service = $this->makeService(workItems: $workItems);
+        $root = (new WorkItemFactory())->fromString('https://example.com/');
+
+        $source = $this->makeRun('run-source', 800);
+        $source->start(at: 810);
+        $source->recordPack(new PackResult(
+            PackStatus::Completed,
+            2,
+            0,
+            4321,
+            '/tmp/exports/run-source.zip',
+            '/tmp/exports/manifest.json',
+        ), at: 820);
+        $source->recordPublishIdentifiers('cid-1', 'web-1', 'ipns-1', at: 830);
+        $source->complete(at: 900);
+        $this->repository->save($source);
+
+        // A prior terminal run that is NOT the source: it is not replayed
+        // and must keep its rows — only the source's slice is purged.
+        $older = $this->makeRun('run-older', 700);
+        $older->start(at: 710);
+        $older->complete(at: 750);
+        $this->repository->save($older);
+
+        // A live running run: never touched by a publish-existing replay.
+        $live = $this->makeRun('run-live', 840);
+        $live->start(at: 850);
+        $this->repository->save($live);
+
+        foreach (['run-source', 'run-older', 'run-live'] as $runId) {
+            self::assertTrue($workItems->insertCanonical($runId, $root)->inserted());
+        }
+        $workItems->transition('run-source', $root->urlHash(), WorkItemStatus::Done);
+        $workItems->transition('run-source', $root->urlHash(), WorkItemStatus::Rewritten);
+
+        $result = $service->publishExisting($source, at: 1000);
+
+        self::assertTrue($result->started);
+        $seeded = $this->repository->latest();
+        self::assertNotNull($seeded);
+        self::assertNotSame('run-source', $seeded->runId);
+        // The seeded replay keeps its publish-only shape: a fresh NotStarted,
+        // dirty, explicitly-started run carrying the source pack and the
+        // previously recorded publish identifiers, with one immediate tick.
+        self::assertSame(RunStatus::NotStarted, $seeded->status);
+        self::assertTrue($seeded->dirty);
+        self::assertTrue($seeded->explicitStart);
+        self::assertSame(ExportRun::RESUME_PUBLISH_ONLY, $seeded->resumeCursor);
+        self::assertSame('/tmp/exports/run-source.zip', $seeded->pack?->zipPath);
+        self::assertSame('cid-1', $seeded->publishCid);
+        self::assertSame('web-1', $seeded->websiteId);
+        self::assertSame('ipns-1', $seeded->ipnsKey);
+        self::assertSame(1000, $this->scheduler->nextAt(ContentPublishScheduler::AUTO_HOOK), 'exactly one immediate tick is scheduled');
+
+        // The source run loses its terminal queue rows, and ONLY the source
+        // loses rows: the non-source terminal run and the live run keep
+        // theirs, and the seeded run starts from an empty slice of its own.
+        self::assertSame(0, $workItems->countByStatus('run-source', WorkItemStatus::Rewritten), 'the source run loses its queue rows');
+        self::assertSame(1, $workItems->countByStatus('run-older', WorkItemStatus::Queued), 'a non-source terminal run keeps its queue rows');
+        self::assertSame(1, $workItems->countByStatus('run-live', WorkItemStatus::Queued), 'a live run keeps its queue rows');
+        self::assertSame(0, $workItems->pendingCount($seeded->runId), 'the seeded run starts from an empty slice');
     }
 
     public function testManualDriftRunIsNotExplicitSoItWaitsForTheUser(): void
