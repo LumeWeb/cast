@@ -27,4 +27,7 @@ enum PublishStartRefusal: string
 
     /** A website/IPNS identity already exists; this is no longer a first publish. */
     case IdentityConflict = 'identity_conflict';
+
+    /** No confirmed destination is persisted; choose and confirm an address first. */
+    case DestinationNotConfirmed = 'destination_not_confirmed';
 }

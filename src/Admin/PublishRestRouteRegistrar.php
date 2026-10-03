@@ -21,6 +21,9 @@ use ComposePress\Core\Hooks;
  *   POST /cast/v1/website          — explicit create (guided path a)
  *   GET  /cast/v1/website/available — picker list for the link path
  *   POST /cast/v1/website/link     — link an existing website (guided path b)
+ *   GET  /cast/v1/publish/destination — the persisted destination setup
+ *   POST /cast/v1/publish/destination — save a destination as an editable draft
+ *   POST /cast/v1/publish/destination/confirm — freeze the confirmed choice
  *
  * Every route is gated by {@see RestAuth}: the manage_options capability and a
  * valid wp_rest REST nonce. The callbacks delegate to {@see PublishRestHandler}
@@ -49,6 +52,21 @@ final class PublishRestRouteRegistrar implements HookSubscriber
     public const WEBSITE_AVAILABLE_ROUTE = '/website/available';
 
     public const WEBSITE_LINK_ROUTE = '/website/link';
+
+    public const DESTINATION_ROUTE = '/publish/destination';
+
+    public const DESTINATION_CONFIRM_ROUTE = '/publish/destination/confirm';
+
+    /**
+     * The ONLY destination fields a request may set: the allowlist the
+     * destination param parser reads (anything else is dropped).
+     *
+     * @var list<string>
+     */
+    private const DESTINATION_FIELDS = [
+        'source', 'domain', 'namespace', 'dns_hosting_enabled',
+        'platform_domain', 'platform_namespace', 'generate', 'label', 'website_id',
+    ];
 
     public const REST_NONCE_ACTION = 'wp_rest';
 
@@ -124,6 +142,74 @@ final class PublishRestRouteRegistrar implements HookSubscriber
             'callback' => [$this, 'linkWebsite'],
             'permission_callback' => [$this, 'canLinkWebsite'],
         ]);
+
+        register_rest_route(self::NAMESPACE, self::DESTINATION_ROUTE, [
+            'methods' => 'GET, POST',
+            'callback' => [$this, 'destination'],
+            'permission_callback' => [$this, 'canManageDestination'],
+        ]);
+
+        register_rest_route(self::NAMESPACE, self::DESTINATION_CONFIRM_ROUTE, [
+            'methods' => 'POST',
+            'callback' => [$this, 'confirmDestination'],
+            'permission_callback' => [$this, 'canManageDestination'],
+        ]);
+    }
+
+    /**
+     * The destination read/save route: GET returns the persisted setup
+     * (the empty view when none exists), POST saves an editable draft from
+     * the allowlisted source fields only.
+     *
+     * @param mixed $request
+     *
+     * @return array<string, mixed>
+     */
+    public function destination(mixed $request): array
+    {
+        if (is_object($request) && method_exists($request, 'get_method') && $request->get_method() === 'POST') {
+            return $this->handler->saveDestination($this->destinationParams($request));
+        }
+
+        return $this->handler->destination();
+    }
+
+    /**
+     * Freeze the confirmed first-publish choice from the allowlisted source
+     * fields only.
+     *
+     * @param mixed $request
+     *
+     * @return array<string, mixed>
+     */
+    public function confirmDestination(mixed $request): array
+    {
+        return $this->handler->confirmDestination($this->destinationParams($request));
+    }
+
+    /**
+     * Read ONLY the allowlisted destination fields from the request — a
+     * forged/extra param can never alter the stored choice.
+     *
+     * @param mixed $request
+     *
+     * @return array<string, mixed>
+     */
+    private function destinationParams(mixed $request): array
+    {
+        if (!is_object($request) || !method_exists($request, 'get_param')) {
+            return [];
+        }
+
+        $data = [];
+        foreach (self::DESTINATION_FIELDS as $field) {
+            $value = $request->get_param($field);
+            if ($value !== null && is_scalar($value)) {
+                $data[$field] = $value;
+            }
+        }
+
+        return $data;
     }
 
     /**
@@ -200,6 +286,11 @@ final class PublishRestRouteRegistrar implements HookSubscriber
     }
 
     public function canLinkWebsite(): bool
+    {
+        return $this->isAuthorized();
+    }
+
+    public function canManageDestination(): bool
     {
         return $this->isAuthorized();
     }

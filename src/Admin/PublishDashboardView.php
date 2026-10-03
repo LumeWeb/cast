@@ -26,6 +26,11 @@ final class PublishDashboardView
     public const READINESS_CONFIG = 'config';
     public const READINESS_SETUP = 'setup';
     public const READINESS_NO_CONTENT = 'no_content';
+    /** A first-time site (no identity) that has not confirmed a destination
+     * yet: the explicit "choose an address" surface, never the generic ready
+     * state that used to let the first publish proceed on an implicit
+     * hostname. */
+    public const READINESS_CHOOSE_ADDRESS = 'choose_address';
 
     const RUN_STATE_IDLE = 'idle';
     const RUN_STATE_QUEUED = 'queued';
@@ -119,6 +124,29 @@ final class PublishDashboardView
          * {@see publishCid} stays null for a resumable park, so this is the
          * only place the S1 card reads it. */
         public readonly ?string $websiteCid = null,
+        /** Explicit custom-domain DNS-wait passthrough from the status
+         * report: the run parked at the awaiting-DNS boundary (website
+         * created, the domain's DNS not connected yet). A waiting state,
+         * never a failure — the chip and context copy key off it. */
+        public readonly bool $awaitingDns = false,
+        /** The selected custom domain of the parked run while
+         * {@see awaitingDns} is true (null otherwise) — quoted verbatim in
+         * the DNS-wait copy, never an implicit list pick. */
+        public readonly ?string $awaitingDomain = null,
+        /** The persisted destination setup's lifecycle ('draft' |
+         * 'confirmed' | 'created_or_attached'), null until one exists —
+         * passthrough so the template renders the address summary without
+         * re-deriving it. */
+        public readonly ?string $destinationLifecycle = null,
+        /** The persisted destination setup's field view (null until one
+         * exists) — passthrough for the address summary. */
+        /** @var array<string, scalar|null>|null */
+        public readonly ?array $destination = null,
+        /** Copy-only passthrough of the skipped-onboarding signal so the
+         * template's setup-slot copy can tell "finish onboarding"
+         * (incomplete) apart from "you skipped it, just publish" — never
+         * re-derived from raw status fields by the template. */
+        public readonly bool $onboardingSkipped = false,
     ) {
     }
 
@@ -133,13 +161,13 @@ final class PublishDashboardView
             readiness: $readiness[0],
             readinessLevel: $readiness[1],
             runState: $runState,
-            stateLabel: self::stateLabelFor($runState, $status->awaitingWebsite),
+            stateLabel: self::stateLabelFor($runState, $status->awaitingWebsite, $status->awaitingDns),
             runLabel: self::runLabelFor($runState, $stageLabel),
             stageLabel: $stageLabel,
-            // A parked run awaiting a website is not progressing: the bar and
-            // value render at 0 (the template hides them anyway) so no fake
-            // percentage brands the parked waiting copy.
-            progressPercent: $status->awaitingWebsite ? 0 : self::progressPercentFor($status->runStage),
+            // A parked run awaiting a website OR a custom-domain DNS is not
+            // progressing: the bar and value render at 0 (the template hides
+            // them anyway) so no fake percentage brands the parked waiting copy.
+            progressPercent: ($status->awaitingWebsite || $status->awaitingDns) ? 0 : self::progressPercentFor($status->runStage),
             progressCount: $status->progressCount,
             pipelineStage: $status->pipelineStage,
             progressTotal: $status->progressTotal,
@@ -153,6 +181,7 @@ final class PublishDashboardView
                 $status->rewriteDone,
                 $status->runStage,
                 $status->awaitingWebsite,
+                $status->awaitingDns,
             ),
             queuedAt: $status->queuedAt,
             queuedEtaLabel: self::queuedEtaLabelFor($runState, $status->queuedAt),
@@ -180,13 +209,18 @@ final class PublishDashboardView
             canPublishArtifact: self::canPublishArtifact($status, $runState, $readiness[0]),
             primaryAction: self::primaryActionFor($status, $runState, $readiness[0]),
             needsPublish: self::needsPublishFor($status, $runState, $readiness[0]),
-            contextMessage: self::contextMessageFor($status, $runState, $readiness[0], $status->awaitingWebsite),
+            contextMessage: self::contextMessageFor($status, $runState, $readiness[0], $status->awaitingWebsite, $status->awaitingDns, $status->awaitingDomain),
             canChangeMode: $readiness[0] === self::READINESS_READY
                 && !in_array($runState, [self::RUN_STATE_QUEUED, self::RUN_STATE_RUNNING, self::RUN_STATE_PAUSED], true),
             adminBar: $adminBar,
             connection: $status->connection,
             awaitingWebsite: $status->awaitingWebsite,
             websiteCid: $status->awaitingCid,
+            awaitingDns: $status->awaitingDns,
+            awaitingDomain: $status->awaitingDomain,
+            destinationLifecycle: $status->destination?->lifecycle,
+            destination: $status->destination?->destination,
+            onboardingSkipped: $status->onboardingSkipped,
         );
     }
 
@@ -207,7 +241,24 @@ final class PublishDashboardView
             return [self::READINESS_NO_CONTENT, 'note'];
         }
 
+        // The first-publish gate's view half: while NO identity exists, the
+        // surface is "choose an address" until a destination is confirmed
+        // (a draft does not count). Once a website identity exists the gate
+        // no longer applies and later publishes keep the ready surface.
+        if ($status->identity === null && !self::hasConfirmedDestination($status)) {
+            return [self::READINESS_CHOOSE_ADDRESS, 'note'];
+        }
+
         return [self::READINESS_READY, 'ok'];
+    }
+
+    /**
+     * Whether the persisted destination setup is a confirmed (or already
+     * created/attached) choice — a draft is not a confirmed choice.
+     */
+    private static function hasConfirmedDestination(PublishStatus $status): bool
+    {
+        return in_array($status->destination?->lifecycle, ['confirmed', 'created_or_attached'], true);
     }
 
     /**
@@ -244,10 +295,17 @@ final class PublishDashboardView
      *
      * @param 'idle'|'queued'|'running'|'paused'|'completed'|'completed_with_warnings'|'failed'|'cancelled' $runState
      */
-    private static function stateLabelFor(string $runState, bool $awaitingWebsite = false): string
+    private static function stateLabelFor(string $runState, bool $awaitingWebsite = false, bool $awaitingDns = false): string
     {
         if ($awaitingWebsite && $runState === self::RUN_STATE_PAUSED) {
             return 'Sent — waiting for a website';
+        }
+
+        // The custom-domain DNS wait gets its own chip: a deliberate pause
+        // waiting on the operator's DNS, never a plain "Paused" and never a
+        // failure.
+        if ($awaitingDns && $runState === self::RUN_STATE_PAUSED) {
+            return 'Waiting for your domain DNS';
         }
 
         return match ($runState) {
@@ -368,6 +426,7 @@ final class PublishDashboardView
         ?int $rewriteDone,
         RunStage $runStage,
         bool $awaitingWebsite = false,
+        bool $awaitingDns = false,
     ): string {
         // A parked run awaiting a website has no progress to show: the upload
         // was sent, the run is paused waiting for a destination, and any
@@ -376,6 +435,13 @@ final class PublishDashboardView
         // awaiting, so the copy never sits next to a made-up number).
         if ($awaitingWebsite) {
             return 'Waiting for a website — the run is paused.';
+        }
+
+        // The custom-domain DNS wait: the upload was sent and the website
+        // created; the run is paused on the domain's DNS, so the honest line
+        // names that wait instead of any percentage or item count.
+        if ($awaitingDns) {
+            return 'Waiting for your domain DNS — the run is paused.';
         }
 
         // A queued (not-started) run has processed nothing by definition: the
@@ -620,6 +686,13 @@ final class PublishDashboardView
      * needed, or why it isn't available. Mirrored client-side by cast-publish.js
      * so a no-refresh status refresh never drifts from this server-read copy.
      *
+     * The setup slot is the ONE onboarding instruction and it is
+     * skipped-aware: an incomplete onboarding says "finish onboarding",
+     * while a deliberately SKIPPED one never instructs finishing it — it gives
+     * the truthful next step (publishing). The gates are untouched: skipped is
+     * terminal and never reaches this slot in the current wiring, but the
+     * copy can never lie about it either way.
+     *
      * A run awaiting a website leads with the design-doc parked copy (the
      * manual path's line) the moment the wait is real — the upload was sent
      * and the run waits for a website, so the runActive "Publishing is
@@ -627,10 +700,26 @@ final class PublishDashboardView
      *
      * @param 'idle'|'queued'|'running'|'paused'|'completed'|'completed_with_warnings'|'failed'|'cancelled' $runState
      */
-    private static function contextMessageFor(PublishStatus $status, string $runState, string $readiness, bool $awaitingWebsite = false): string
-    {
+    private static function contextMessageFor(
+        PublishStatus $status,
+        string $runState,
+        string $readiness,
+        bool $awaitingWebsite = false,
+        bool $awaitingDns = false,
+        ?string $awaitingDomain = null,
+    ): string {
         if ($awaitingWebsite) {
             return 'Your upload was sent. The run is waiting for a website — open Pinner and create one or attach one to this workspace, then come back.';
+        }
+
+        if ($awaitingDns) {
+            // The custom-domain DNS wait: the upload and the website create
+            // both struck; only the domain's DNS is outstanding. The copy
+            // quotes the SELECTED domain and names the resume, so the normal
+            // wait never reads as a publish failure.
+            return $awaitingDomain !== null
+                ? 'Your site is uploaded and the website for ' . $awaitingDomain . ' is created. Connect the domain\'s DNS, then resume — the upload will not be repeated.'
+                : 'Your site is uploaded. Connect your domain\'s DNS, then resume — the upload will not be repeated.';
         }
 
         if ($status->runActive) {
@@ -646,7 +735,10 @@ final class PublishDashboardView
         if ($readiness !== self::READINESS_READY) {
             return match ($readiness) {
                 self::READINESS_CONFIG => 'Publishing is unavailable until the configuration below is resolved.',
-                self::READINESS_SETUP => 'Finish onboarding to publish your site.',
+                self::READINESS_SETUP => $status->onboardingSkipped
+                    ? 'You skipped onboarding, so there is nothing to finish — publish your site whenever you are ready.'
+                    : 'Finish onboarding to publish your site.',
+                self::READINESS_CHOOSE_ADDRESS => 'Choose an address for your site — pick a Pinner address, your own domain, or a Pinner site you already have.',
                 default => 'Add publishable content, then publish your site to Pinner.',
             };
         }

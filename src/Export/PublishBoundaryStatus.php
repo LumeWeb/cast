@@ -19,4 +19,9 @@ enum PublishBoundaryStatus: string
     case Completed = 'completed';
     case Failed = 'failed';
     case Resumable = 'resumable';
+    /** A custom-domain first publish that created its website and now waits
+     * for the domain's DNS to connect: an explicit, deliberate waiting state
+     * (CID/website/IPNS preserved) — never a failure, and resumed through the
+     * DNS-verification path without re-uploading. */
+    case AwaitingDns = 'awaiting_dns';
 }

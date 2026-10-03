@@ -838,6 +838,15 @@
 	opacity: 0.85;
 }
 
+/* The concise informative line the card carries while the trigger selector
+   is withheld (a non-ready surface or a live run) — never an empty heading. */
+.cast-publish-mode-locked {
+	margin: 0;
+	font-size: 12px;
+	line-height: 1.5;
+	color: #50575e;
+}
+
 /* The visible per-mode guidance line (the active mode's full end-user copy). */
 .cast-publish-mode-help {
 	margin: 6px 0 0;
@@ -867,60 +876,101 @@
 .cast-publish-refresh {
 	margin: 0;
 }
+/* ------------------- site address card + wizard -----------------
+   The "Your site address" surface: a summary (source label, address, the
+   durable note and the review prompt) plus the inline wizard with exactly
+   three native radio choices, each branch exposing only its own fields. It
+   sits among the other `.card` blocks in the publish shell, so it inherits
+   the same card base and WP admin tokens; these rules only lay out the card
+   interior. */
 
-/* ------------------- guided website choice card -----------------
-   The S1 "needs a website" surface (create / link paths), rendered
-   in templates/admin/publish.php and mirrored client-side by cast-publish.js
-   into the same placeholder. It sits among the other `.card` blocks inside
-   the publish shell, so it inherits the same card base and WP admin tokens;
-   these rules only lay out the card interior: the preserved-CID chip, the
-   create form (label above input, primary create button, and the
-   empty-hostname confirm revealed only on demand) and the link picker as one
-   row per website (name + status). */
-
-.cast-website-card h2 {
+.cast-address-card h2 {
 	margin: 0 0 8px;
 }
 
-.cast-website-subline {
+.cast-address-prompt {
 	margin: 0 0 10px;
 	font-size: 13px;
 	line-height: 1.6;
 	color: #50575e;
 }
 
-/* The preserved CID: a quiet mono chip naming the value the operator matches
-   in Pinner, kept in the same quiet-blue family as the state chips. */
-.cast-website-cid {
-	display: inline-block;
-	margin: 0 0 8px;
-	padding: 2px 10px;
-	border-radius: 10px;
-	border: 1px solid #c8dcea;
-	background: #f0f6fc;
-	color: #0073aa;
-	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-	font-size: 12px;
-	line-height: 1.6;
+.cast-address-source {
+	font-weight: 600;
 }
 
-/* Each path is its own separated block under the card intro. */
-.cast-website-path {
-	margin: 14px 0 0;
-	padding: 14px 0 0;
+.cast-address-value {
+	margin: 4px 0;
+	font-size: 14px;
+	font-weight: 600;
+	overflow-wrap: anywhere;
+}
+
+.cast-address-durable {
+	margin: 0 0 10px;
+	font-size: 12px;
+	color: #50575e;
+}
+
+/* The wizard is a separated block under the summary, revealed in place. */
+.cast-address-wizard {
+	margin-top: 14px;
+	padding-top: 14px;
 	border-top: 1px solid #dcdcde;
 }
 
-.cast-website-path h3 {
+.cast-address-wizard h3 {
 	margin: 0 0 10px;
 	font-size: 14px;
 	font-weight: 600;
 	line-height: 1.4;
 }
 
-/* Create path: the hostname label sits above its input and the primary
-   button below it — each on its own line, never a run-on row. */
-.cast-website-hostname-label {
+.cast-address-wizard-sources {
+	margin: 0 0 14px;
+	padding: 0;
+	border: 0;
+}
+
+/* Each choice is a tappable row: the native radio, the name, the help line. */
+.cast-address-source-option {
+	display: block;
+	margin: 0 0 8px;
+	padding: 10px 12px;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	background: #f6f7f7;
+}
+
+.cast-address-source-option input {
+	margin-right: 8px;
+}
+
+.cast-address-source-name {
+	display: block;
+	font-weight: 600;
+}
+
+.cast-address-source-help {
+	display: block;
+	margin-top: 2px;
+	font-size: 12px;
+	color: #50575e;
+}
+
+/* A branch exposes only its own fields; the others stay hidden. */
+.cast-address-branch {
+	margin: 0 0 14px;
+}
+
+/* The platform branch has no fields: a plain note that nothing is required. */
+.cast-address-branch-note {
+	margin: 0;
+	font-size: 13px;
+	color: #50575e;
+}
+
+.cast-address-field-label {
 	display: block;
 	margin: 0 0 4px;
 	font-size: 12px;
@@ -928,99 +978,209 @@
 	color: #50575e;
 }
 
-.cast-website-hostname {
+.cast-address-custom-domain,
+.cast-address-custom-namespace,
+.cast-address-existing-website {
 	display: block;
-	width: 100%;
-	max-width: 360px;
 	margin: 0 0 10px;
+	max-width: 320px;
 }
 
-.cast-website-create,
-.cast-website-create-confirm-btn {
-	margin: 0;
+.cast-address-dns-options {
+	margin: 0 0 10px;
+	padding: 0;
+	border: 0;
 }
 
-/* The empty-hostname confirm line sits under the create button as a quiet
-   question until the orchestrator sets the empty hostname. */
-.cast-website-create-confirm {
-	margin: 0 0 10px;
-	font-size: 13px;
+.cast-address-dns-options legend {
+	font-size: 12px;
+	font-weight: 600;
 	color: #50575e;
 }
 
-/* Link picker: one website per row. The whole row is the click target and
-   carries the name + status left/right, so an available list reads as a
-   proper list, not a run-on sentence. */
-.cast-website-picker {
-	list-style: none;
-	margin: 0;
-	padding: 0;
-}
-
-.cast-website-picker li {
+.cast-address-dns-option {
+	display: block;
 	margin: 0 0 6px;
 }
 
-.cast-website-picker-row {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 12px;
-	width: 100%;
-	padding: 10px 12px;
-	text-align: left;
-	border: 1px solid #c3c4c7;
-	border-radius: 4px;
-	background: #f6f7f7;
-	color: #1d2327;
+.cast-address-dns-option input {
+	margin-right: 8px;
+}
+
+/* The self-managed choice is tucked under an explicit Advanced disclosure,
+   closed by default, so the managed default stays the plain path. */
+.cast-address-advanced {
+	margin: 0 0 6px;
+}
+
+.cast-address-advanced-summary {
+	font-size: 12px;
+	color: #50575e;
 	cursor: pointer;
 }
 
-.cast-website-picker-row:hover,
-.cast-website-picker-row:focus {
-	border-color: var(--wp-admin-theme-color, #2271b1);
+.cast-address-advanced .cast-address-dns-option {
+	margin-top: 6px;
 }
 
-.cast-website-picker-name {
-	font-weight: 600;
-}
-
-.cast-website-picker-status {
+/* The namespace-specific DNS note: one per namespace, the orchestrator
+   reveals exactly the one matching the chosen domain type. */
+.cast-address-namespace-note {
+	margin: 0 0 10px;
 	font-size: 12px;
 	color: #50575e;
 }
 
-.cast-website-link-empty {
+/* The existing-site picker's distinct states: loading (a quiet status line),
+   error (the standard error notice) and empty (the muted note). */
+.cast-address-existing-loading {
+	margin: 0 0 10px;
+	font-size: 12px;
+	color: #50575e;
+}
+
+.cast-address-existing-error {
+	margin: 0 0 10px;
+}
+
+.cast-address-existing-empty {
+	margin: 0 0 10px;
+	font-size: 12px;
+	color: #50575e;
+}
+
+/* The plain final review: a quiet read-out, never a second form. */
+.cast-address-review-box {
+	margin: 0 0 12px;
+	padding: 10px 12px;
+	border: 1px solid #c8dcea;
+	border-radius: 4px;
+	background: #f0f6fc;
+}
+
+.cast-address-review-copy {
 	margin: 0;
 	font-size: 13px;
-	color: #50575e;
+	line-height: 1.6;
+	overflow-wrap: anywhere;
 }
 
-.cast-website-error {
-	margin: 12px 0 0;
+.cast-address-wizard-error {
+	margin: 0 0 10px;
 }
 
-.cast-website-result {
-	min-height: 1.4em;
-	margin: 10px 0 0;
+.cast-address-wizard-result {
+	margin: 0 0 10px;
 	font-size: 13px;
 	color: #50575e;
 }
 
-/* The empty-hostname confirmation (line + button) is hidden by default and
-   only revealed by the orchestrator when the operator clicks Create website
-   with no hostname. The WP core `.button` rule sets an author display on the
-   confirm button, which would otherwise beat the UA `[hidden] { display:none }`
-   (equal specificity, author sheet wins) and leave the confirm permanently
-   visible — the exact run-on "Create website Yes, auto-generate" the dashboard
-   test saw. These (0,2,0) re-pins beat the (0,1,0) author display rules, the
-   same way `.cast-publish-cancel`/`.cast-publish-start-now` re-pin theirs
-   above. The card/empty/error pins keep their own reveals honest too. */
-.cast-website-create-confirm[hidden],
-.cast-website-create-confirm-btn[hidden],
-.cast-website-link-empty[hidden],
-.cast-website-error[hidden],
-.cast-website-card[hidden] {
+/* ------------------- connect your domain card -------------------
+   Custom destinations only: the SELECTED domain, its DNS setup guidance
+   (records/nameserver tables built through textContent) and the SSL line,
+   with a small inline Copy button beside each value and the re-check
+   control at the foot. */
+
+.cast-domain-setup-card h2 {
+	margin: 0 0 8px;
+}
+
+.cast-domain-setup-domain {
+	margin: 0 0 8px;
+	font-size: 14px;
+	font-weight: 600;
+	overflow-wrap: anywhere;
+}
+
+.cast-domain-setup-dns-mode {
+	margin: 0 0 12px;
+	font-size: 12px;
+	color: #50575e;
+}
+
+.cast-domain-section {
+	margin: 14px 0 0;
+	padding: 14px 0 0;
+	border-top: 1px solid #dcdcde;
+}
+
+.cast-domain-dns-summary,
+.cast-domain-dns-instruction {
+	margin: 0 0 8px;
+	font-size: 13px;
+	line-height: 1.6;
+}
+
+.cast-domain-dns-subheading {
+	margin: 12px 0 6px;
+	font-size: 12px;
+	font-weight: 600;
+	color: #50575e;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.cast-domain-dns-table,
+.cast-domain-records {
+	width: 100%;
+	max-width: 480px;
+	margin: 0 0 10px;
+	border-collapse: collapse;
+	font-size: 12px;
+}
+
+.cast-domain-dns-table th,
+.cast-domain-dns-table td,
+.cast-domain-records th,
+.cast-domain-records td {
+	padding: 4px 8px;
+	border: 1px solid #dcdcde;
+	text-align: left;
+	vertical-align: top;
+	overflow-wrap: anywhere;
+}
+
+.cast-domain-dns-table th,
+.cast-domain-records th {
+	background: #f6f7f7;
+}
+
+.cast-domain-copy-value {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.cast-domain-copy {
+	margin-left: 6px;
+	padding: 0 8px;
+	font-size: 11px;
+	line-height: 2;
+}
+
+.cast-domain-checks {
+	margin: 0 0 10px;
+}
+
+.cast-domain-dnssec-error {
+	margin: 8px 0;
+	font-size: 12px;
+	color: #d63638;
+}
+
+.cast-domain-setup-check {
+	margin: 10px 0 0;
+}
+
+/* The [hidden] toggles: the wizard, its branches, the review box, the
+   message lines and the whole connect card are revealed/hidden by the
+   orchestrator (and the server paint) through the hidden attribute. */
+.cast-address-wizard[hidden],
+.cast-address-branch[hidden],
+.cast-address-review-box[hidden],
+.cast-address-existing-empty[hidden],
+.cast-address-existing-loading[hidden],
+.cast-address-existing-error[hidden],
+.cast-address-wizard-error[hidden],
+.cast-domain-setup-card[hidden] {
 	display: none;
 }
 

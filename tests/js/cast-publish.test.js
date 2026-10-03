@@ -231,38 +231,12 @@ function defaultDomainRow(overrides) {
 	);
 }
 
-function defaultDomainList() {
-	return {
-		listed: true,
-		status: 'ok',
-		domains: [defaultDomainRow()],
-		refusal: null,
-	};
-}
-
-function defaultDomainBind() {
-	return {
-		bound: true,
-		status: 'bound',
-		domain: defaultDomainRow(),
-		refusal: null,
-	};
-}
-
+/** The delegation-records read (the GET /domains/dns payload). */
 function defaultDomainDns() {
 	return {
 		ok: true,
 		status: 'ok',
 		domain: defaultDomainRow({ domain: 'name/', namespace: 'hns' }),
-		refusal: null,
-	};
-}
-
-function defaultDomainVerify() {
-	return {
-		verified: true,
-		status: 'verified',
-		domain: defaultDomainRow({ status: 'active' }),
 		refusal: null,
 	};
 }
@@ -287,31 +261,6 @@ function defaultDomainValidate() {
 					found: 'dnslink=/ipfs/QmWrong',
 				},
 			],
-		},
-		refusal: null,
-	};
-}
-
-function defaultDomainDelete() {
-	return { deleted: true, status: 'deleted', domain_id: '99', refusal: null };
-}
-
-function defaultDomainPlatform() {
-	return {
-		ok: true,
-		status: 'ok',
-		platform_domains: [{ id: 3, domain: 'pinner.xyz', namespace: 'icann', zone_id: 101, enabled: true }],
-		refusal: null,
-	};
-}
-
-function defaultDomainAvailability() {
-	return {
-		ok: true,
-		status: 'ok',
-		availability: {
-			label: 'my-site',
-			results: [{ platform_domain: 'pinner.xyz', namespace: 'icann', available: true }],
 		},
 		refusal: null,
 	};
@@ -380,11 +329,6 @@ function makeDomainMarker(action, attrs) {
 	};
 }
 
-/** A guided website-card marker ([data-website-action]) double. */
-function makeWebsiteMarker(action, attrs) {
-	return makeDomainMarker(action, Object.assign({ 'data-website-action': action }, attrs || {}));
-}
-
 /**
  * A scripted fetch double. `script.status` may be an object, an array of
  * objects (consumed in order, the last repeats), or a function
@@ -415,30 +359,22 @@ function makeFetch(script, calls) {
 			descriptor = script.artifact || { queued: true, status: 'queued', run_id: 'r-artifact' };
 		} else if (url.indexOf('/publish/now') !== -1) {
 			descriptor = script.now || { queued: true, status: 'queued', run_id: 'r-now' };
-		} else if (url.indexOf('/domains/list') !== -1) {
-			descriptor = pickDescriptor(script.domain_list, defaultDomainList(), calls);
-		} else if (url.indexOf('/domains/bind') !== -1) {
-			descriptor = pickDescriptor(script.domain_bind, defaultDomainBind(), calls);
 		} else if (url.indexOf('/domains/dns') !== -1) {
 			descriptor = pickDescriptor(script.domain_dns, defaultDomainDns(), calls);
-		} else if (url.indexOf('/domains/verify') !== -1) {
-			descriptor = pickDescriptor(script.domain_verify, defaultDomainVerify(), calls);
 		} else if (url.indexOf('/domains/validate') !== -1) {
 			descriptor = pickDescriptor(script.domain_validate, defaultDomainValidate(), calls);
-		} else if (url.indexOf('/domains/delete') !== -1) {
-			descriptor = pickDescriptor(script.domain_delete, defaultDomainDelete(), calls);
-		} else if (url.indexOf('/domains/platform') !== -1) {
-			descriptor = pickDescriptor(script.domain_platform, defaultDomainPlatform(), calls);
-		} else if (url.indexOf('/domains/availability') !== -1) {
-			descriptor = pickDescriptor(script.domain_availability, defaultDomainAvailability(), calls);
 		} else if (url.indexOf('/domains/ssl') !== -1) {
 			descriptor = pickDescriptor(script.domain_ssl, defaultDomainSsl(), calls);
 		} else if (url.indexOf('/website/available') !== -1) {
 			descriptor = pickDescriptor(script.website_available, defaultWebsiteAvailable(), calls);
-		} else if (url.indexOf('/website/link') !== -1) {
-			descriptor = script.website_link || { linked: true, status: 'linked', website_id: '66', refusal: null };
-		} else if (url.indexOf('/website') !== -1) {
-			descriptor = script.website_create || { created: true, status: 'created', website_id: '77', website_name: 'sub.example.com', domain: 'sub.example.com', refusal: null };
+		} else if (url.indexOf('/publish/destination/confirm') !== -1) {
+			descriptor = script.destination_confirm || { confirmed: true, status: 'confirmed', refusal: null, lifecycle: 'confirmed' };
+		} else if (url.indexOf('/publish/destination') !== -1) {
+			if (options && options.method === 'GET') {
+				descriptor = script.destination_get || { lifecycle: null, destination: null };
+			} else {
+				descriptor = script.destination_save || { saved: true, status: 'saved', refusal: null, lifecycle: 'draft' };
+			}
 		} else {
 			descriptor = script.start || { queued: true, status: 'queued', run_id: 'r-start' };
 		}
@@ -483,30 +419,42 @@ const DISPLAY_SELECTORS = [
 	'.cast-publish-mode-help',
 	// The queued recovery/start-now escape (revealed after a wait while queued).
 	'.cast-publish-escape',
-	// The choose-a-domain panel nodes the domain orchestrator updates.
-	'.cast-domain-panel',
-	'.cast-domain-state',
-	'.cast-domain-list',
-	'.cast-domain-list-empty',
-	'.cast-domain-list-refusal',
+	// The "Connect your domain" card (custom destinations only) nodes the
+	// domain orchestrator updates: the DNS label/copy area and the SSL label.
 	'.cast-domain-dns-label',
 	'.cast-domain-dns-copy',
 	'.cast-domain-ssl-label',
-	// The guided website card (S1) nodes the awaiting-website orchestrator
-	// updates: the root placeholder, the card itself, the preserved-CID line,
-	// the two paths (create hostname/confirmation; link picker) and the error/
-	// result lines. There is no manual "handle it in Pinner / Dismiss" path.
-	'.cast-website-root',
-	'.cast-website-card',
-	'.cast-website-cid',
-	'.cast-website-hostname',
-	'.cast-website-create',
-	'.cast-website-create-confirm',
-	'.cast-website-create-confirm-btn',
-	'.cast-website-picker',
-	'.cast-website-link-empty',
-	'.cast-website-error',
-	'.cast-website-result',
+	// The "Your site address" card + inline wizard nodes the address
+	// orchestrator updates: the summary (source label + value + durable note +
+	// review prompt), the hidden wizard (three native source radios, the three
+	// branch field groups, the plain review read-out, the error/result lines
+	// and the confirm button).
+	'.cast-address-card',
+	'.cast-address-prompt',
+	'.cast-address-choose',
+	'.cast-address-state',
+	'.cast-address-source',
+	'.cast-address-value',
+	'.cast-address-durable',
+	'.cast-address-review',
+	'.cast-address-wizard',
+	// The branches are keyed by the template's data-cast-address-branch
+	// attribute (the orchestrator reveals exactly the selected source's).
+	'[data-cast-address-branch="platform"]',
+	'[data-cast-address-branch="custom"]',
+	'[data-cast-address-branch="existing"]',
+	'.cast-address-review-box',
+	'.cast-address-review-copy',
+	'.cast-address-existing-empty',
+	// The existing-site picker's distinct loading / error states.
+	'.cast-address-existing-loading',
+	'.cast-address-existing-error',
+	'.cast-address-wizard-error',
+	'.cast-address-wizard-result',
+	'.cast-address-confirm',
+	// The "Connect your domain" card root + the selected-domain line.
+	'.cast-domain-setup-card',
+	'.cast-domain-setup-domain',
 ];
 
 const DEFAULT_ENDPOINTS = {
@@ -516,18 +464,13 @@ const DEFAULT_ENDPOINTS = {
 	mode: 'http://example.test/wp-json/cast/v1/publish/mode',
 	cancel: 'http://example.test/wp-json/cast/v1/publish/cancel',
 	artifact: 'http://example.test/wp-json/cast/v1/publish/artifact',
-	domain_list: 'http://example.test/wp-json/cast/v1/domains/list',
-	domain_bind: 'http://example.test/wp-json/cast/v1/domains/bind',
 	domain_dns: 'http://example.test/wp-json/cast/v1/domains/dns',
-	domain_verify: 'http://example.test/wp-json/cast/v1/domains/verify',
 	domain_validate: 'http://example.test/wp-json/cast/v1/domains/validate',
-	domain_delete: 'http://example.test/wp-json/cast/v1/domains/delete',
-	domain_platform: 'http://example.test/wp-json/cast/v1/domains/platform',
-	domain_availability: 'http://example.test/wp-json/cast/v1/domains/availability',
 	domain_ssl: 'http://example.test/wp-json/cast/v1/domains/ssl',
-	website_create: 'http://example.test/wp-json/cast/v1/website',
+	destination_get: 'http://example.test/wp-json/cast/v1/publish/destination',
+	destination_save: 'http://example.test/wp-json/cast/v1/publish/destination',
+	destination_confirm: 'http://example.test/wp-json/cast/v1/publish/destination/confirm',
 	website_available: 'http://example.test/wp-json/cast/v1/website/available',
-	website_link: 'http://example.test/wp-json/cast/v1/website/link',
 };
 
 /**
@@ -546,23 +489,32 @@ function load(options) {
 	const fetchDouble = opts.fetch || makeFetch(script, calls);
 	const buttons = opts.buttons || [];
 	const markers = opts.markers || [];
-	const websiteMarkers = opts.websiteMarkers || [];
+	const addressControls = opts.addressControls || [];
+	const copyControls = opts.copyControls || [];
 	const refreshControls = opts.refreshControls || [];
 
 	const nodes = {};
 	DISPLAY_SELECTORS.forEach((sel) => {
-		nodes[sel] = makeNode(sel.slice(1));
+		// The data-attribute branch selectors map onto the template's shared
+		// .cast-address-branch class (one class, keyed by the attribute).
+		const className = sel.startsWith('[data-') ? 'cast-address-branch' : sel.slice(1);
+		nodes[sel] = makeNode(className);
 	});
 
-	// The empty-hostname confirmation copy the server template pins into the
-	// card (templates/admin/publish.php, cast-website-create-confirm /
-	// -confirm-btn). The orchestrator only reveals/hides those nodes — it never
-	// writes their text — so the harness must carry the same pinned copy a real
-	// server render would, or the confirm assertions would see an empty node.
-	nodes['.cast-website-create-confirm'].textContent = 'Platform domain will be auto-generated — continue?';
-	nodes['.cast-website-create-confirm-btn'].textContent = 'Yes, auto-generate';
+	// Model the server paint: nodes the template renders with the `hidden`
+	// attribute start hidden (the orchestrator reveals them).
+	(opts.initialHidden || []).forEach((sel) => {
+		if (nodes[sel]) {
+			nodes[sel].hidden = true;
+		}
+	});
 
 	const registry = { objects: {}, created: [] };
+	// Wizard field nodes addressed by id (the template emits id="cast-address-…"
+	// inputs the orchestrator reads through getElementById).
+	Object.keys(opts.idNodes || {}).forEach((id) => {
+		registry.objects[id] = opts.idNodes[id];
+	});
 	const liveRegion = opts.liveRegion === undefined ? makeNode('cast-publish-live', 'cast-publish-live') : opts.liveRegion;
 
 	const document = {
@@ -582,8 +534,20 @@ function load(options) {
 			if (sel === '[data-domain-action]') {
 				return markers;
 			}
-			if (sel === '[data-website-action]') {
-				return websiteMarkers;
+			if (sel === '[data-cast-address-action]') {
+				return addressControls;
+			}
+			if (sel === '[data-cast-copy]') {
+				return copyControls;
+			}
+			if (sel === 'input[name="cast-address-source"]') {
+				return opts.addressSourceRadios || [];
+			}
+			if (sel === 'input[name="cast-address-dns"]') {
+				return opts.addressDnsRadios || [];
+			}
+			if (sel === '[data-cast-namespace-note]') {
+				return opts.addressNamespaceNotes || [];
 			}
 			if (sel === '[data-cast-publish-refresh]') {
 				return refreshControls;
@@ -604,18 +568,16 @@ function load(options) {
 			actions: ['start', 'now', 'mode', 'cancel', 'artifact'],
 			poll: { intervalMs: 50, maxAttempts: 4, backoffMs: 0 },
 			domain_actions: [
-				'domain_list',
-				'domain_bind',
 				'domain_dns',
-				'domain_verify',
 				'domain_validate',
-				'domain_delete',
-				'domain_platform',
-				'domain_availability',
 				'domain_ssl',
 			],
-			website_actions: ['website_create', 'website_available', 'website_link'],
-			verify_poll: { intervalMs: 50, maxAttempts: 3 },
+			destination_actions: [
+				'destination_get',
+				'destination_save',
+				'destination_confirm',
+				'website_available',
+			],
 		},
 		opts.config || {}
 	);
@@ -624,6 +586,7 @@ function load(options) {
 	const window = {
 		castPublish: config,
 		fetch: fetchDouble,
+		navigator: opts.navigator,
 		setTimeout: timers.setTimeout,
 		clearTimeout: timers.clearTimeout,
 	};
@@ -640,7 +603,8 @@ function load(options) {
 		nodes,
 		buttons,
 		markers,
-		websiteMarkers,
+		addressControls,
+		copyControls,
 		refreshControls,
 		liveRegion,
 		created: registry.created,
@@ -841,6 +805,27 @@ test('contextOf mirrors the PublishDashboardView "why publish" copy', () => {
 		client.contextOf(statusWith({ has_eligible_content: false })),
 		'Add publishable content, then publish your site to Pinner.'
 	);
+});
+
+test('the onboarding instruction distinguishes skipped from incomplete', () => {
+	const { client } = load();
+
+	// Incomplete (never finished): the honest instruction is to finish it.
+	assert.equal(
+		client.contextOf(statusWith({ onboarding_complete: false })),
+		'Finish onboarding to publish your site.'
+	);
+	assert.equal(client.readinessLabelOf(statusWith({ onboarding_complete: false })), 'Finish onboarding to publish');
+
+	// Skipped: it must NOT instruct finishing something the user deliberately
+	// skipped — the truthful next step is publishing.
+	const skipped = statusWith({ onboarding_complete: false, onboarding_skipped: true });
+	assert.equal(
+		client.contextOf(skipped),
+		'You skipped onboarding, so there is nothing to finish — publish your site whenever you are ready.'
+	);
+	assert.doesNotMatch(client.contextOf(skipped), /finish onboarding/i);
+	assert.equal(client.readinessLabelOf(skipped), 'Onboarding skipped — publish when ready');
 });
 
 test('queuedElapsedSeconds/formatElapsed time the wait from the server timestamp', () => {
@@ -1250,6 +1235,40 @@ test('status is fetched with the nonce header and renders the card through textC
 	assertNoInnerHTML([nodes['.cast-publish-cid'], nodes['.cast-publish-site'], nodes['.cast-publish-run-label']]);
 });
 
+test('the setup readiness line is hidden so the onboarding instruction is stated once', async () => {
+	const { nodes, client } = load({
+		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
+		script: { status: statusWith({ onboarding_complete: false }) },
+	});
+
+	await tick();
+
+	assert.equal(nodes['.cast-publish-readiness-level'].hidden, true, 'the readiness line does not repeat the onboarding instruction');
+	assert.equal(nodes['.cast-publish-context'].textContent, 'Finish onboarding to publish your site.');
+
+	// …and a later poll completing onboarding reveals it again.
+	client.applyStatus(statusWith({}));
+	await tick();
+	assert.equal(nodes['.cast-publish-readiness-level'].hidden, false, 'the readiness line returns once onboarding is complete');
+	assert.equal(nodes['.cast-publish-readiness-level'].textContent, 'Ready to publish');
+});
+
+test('a skipped-onboarding report renders the truthful next step, not the finish instruction', async () => {
+	const { nodes } = load({
+		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
+		script: { status: statusWith({ onboarding_complete: false, onboarding_skipped: true }) },
+	});
+
+	await tick();
+
+	assert.equal(
+		nodes['.cast-publish-context'].textContent,
+		'You skipped onboarding, so there is nothing to finish — publish your site whenever you are ready.'
+	);
+	assert.doesNotMatch(nodes['.cast-publish-context'].textContent, /finish onboarding/i);
+	assert.equal(nodes['.cast-publish-readiness-level'].hidden, true, 'the readiness line never repeats the onboarding instruction');
+});
+
 test('hidden conditional nodes toggle as the status drifts', async () => {
 	const script = {
 		status: [
@@ -1395,14 +1414,12 @@ test('applyStatus reconciles the single primary button and marks the active mode
 	assert.equal(primary.disabled, true, 'the primary is disabled while a run is live');
 	assert.equal(primary.getAttribute('data-cast-publish-action'), '', 'a live run clears the primary action');
 
-	// The live report's mode marks the matching option (on_update) active and
-	// non-actionable even mid-run; the alternative (manual) stays clear and
-	// selectable.
-	assert.doesNotMatch(manual.className, /is-active/);
-	assert.match(onUpdate.className, /is-active/);
-	assert.equal(manual['aria-pressed'], 'false');
+	// The live report's mode checks the matching radio (on_update) and makes it
+	// non-actionable even mid-run; the alternative (manual) stays unchecked
+	// and selectable.
+	assert.equal(manual.checked, false, 'the non-active mode radio is unchecked');
 	assert.equal(manual.disabled, false);
-	assert.equal(onUpdate['aria-pressed'], 'true', 'the report mode is pressed');
+	assert.equal(onUpdate.checked, true, 'the report mode radio is checked');
 	assert.equal(onUpdate.disabled, true, 'the report mode is non-actionable');
 
 	// A ready, resumable state re-arms the SAME primary button with the
@@ -1428,13 +1445,11 @@ test('applyStatus reconciles the single primary button and marks the active mode
 	// identity), so the first-publish start guard stays shut — mirrors the view
 	// model's canStart.
 	assert.equal(client.primaryActionFor(statusWith({ run_status: 'completed', identity: null })), null);
-	assert.match(manual.className, /is-active/);
-	assert.doesNotMatch(onUpdate.className, /is-active/);
-	// The active mode is visibly selected AND non-actionable; the alternatives
-	// become actionable again.
-	assert.equal(manual['aria-pressed'], 'true', 'the active mode is pressed');
+	// The active mode is visibly selected (checked) AND non-actionable; the
+	// alternatives become actionable again (unchecked).
+	assert.equal(manual.checked, true, 'the active mode radio is checked');
 	assert.equal(manual.disabled, true, 'the active mode is disabled/non-actionable');
-	assert.equal(onUpdate['aria-pressed'], 'false');
+	assert.equal(onUpdate.checked, false, 'the non-active mode radio is unchecked');
 	assert.equal(onUpdate.disabled, false);
 });
 
@@ -1911,201 +1926,17 @@ test('a forged action button in the DOM is inert when its action is unknown', as
 	assert.equal(posts.length, 0, 'a forged button must never reach an action route');
 });
 
-/* ------------------------ domain surface ------------------------ */
+/* ------------------------ connect your domain --------------------------- */
 
 /**
- * The choose-a-domain step mirrors the DomainDashboardView mappings
- * server-side: the client lists the bound domains, binds an ICANN/HNS domain,
- * (re)verifies a binding with a BOUNDED verify poll over the domain list,
- * deletes a binding, reads the selected domain's DNS delegation requirements
- * and SSL status, and reads the pre-bind platform catalog. Every domain route
- * is localized under castPublish.endpoints.domain_* and each operation is
- * guarded by the same X-WP-Nonce header + the localized domain_actions
- * allowlist; every DOM write goes through textContent.
+ * The "Connect your domain" card (custom destinations only) mirrors the
+ * DomainDashboardView mappings server-side: the client re-reads the selected
+ * domain's DNS delegation requirements and SSL status and re-runs the DNS
+ * validation check. Every domain route is localized under
+ * castPublish.endpoints.domain_* and each operation is guarded by the same
+ * X-WP-Nonce header + the localized domain_actions allowlist; every DOM write
+ * goes through textContent.
  */
-
-test('domainList fetches the list with the nonce and renders rows via textContent', async () => {
-	const { client, calls, nodes } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-	});
-
-	const result = await client.domainList();
-
-	assert.equal(result, true, 'a successful list fetch resolves true');
-	const req = calls.find((c) => c.url === DEFAULT_ENDPOINTS.domain_list);
-	assert.ok(req, 'the domain list route is requested');
-	assert.equal(req.options.method, 'GET');
-	assert.equal(req.options.headers['X-WP-Nonce'], 'wp-rest-nonce');
-	assert.equal(req.options.credentials, 'same-origin');
-
-	assert.equal(nodes['.cast-domain-state'].textContent, 'Choose and manage your domain');
-	assert.equal(nodes['.cast-domain-list'].children.length, 1, 'one domain row is rendered');
-	assert.equal(nodes['.cast-domain-list'].children[0].children[0].textContent, 'site.example.test');
-	assert.equal(nodes['.cast-domain-list'].hidden, false);
-	assert.equal(nodes['.cast-domain-list-empty'].hidden, true);
-	assert.equal(nodes['.cast-domain-list-refusal'].hidden, true);
-
-	assertNoInnerHTML(Object.values(nodes));
-});
-
-test('domainList renders the empty-list state for a bound-free website', async () => {
-	const { client, nodes } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-		script: { domain_list: { listed: true, status: 'ok', domains: [], refusal: null } },
-	});
-
-	const result = await client.domainList();
-
-	assert.equal(result, true);
-	// The state line and the empty-list line name different things, so the
-	// empty state must not write the same string to both nodes (no visible
-	// duplicate line).
-	assert.equal(nodes['.cast-domain-state'].textContent, 'Choose and manage your domain');
-	assert.equal(nodes['.cast-domain-list'].children.length, 0);
-	assert.equal(nodes['.cast-domain-list'].hidden, true);
-	assert.equal(nodes['.cast-domain-list-empty'].hidden, false);
-	assert.equal(nodes['.cast-domain-list-empty'].textContent, 'No domains bound yet.');
-
-	assertNoInnerHTML(Object.values(nodes));
-});
-
-test('domainList renders the refusal copy when the server refuses the list', async () => {
-	const { client, nodes } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-		script: { domain_list: { listed: false, status: 'refused', domains: [], refusal: 'identity_missing' } },
-	});
-
-	const result = await client.domainList();
-
-	assert.equal(result, true);
-	assert.equal(nodes['.cast-domain-state'].textContent, 'Domain data unavailable');
-	assert.equal(nodes['.cast-domain-list-refusal'].hidden, false);
-	assert.equal(nodes['.cast-domain-list-refusal'].textContent, 'identity_missing');
-	assert.equal(nodes['.cast-domain-list'].hidden, true);
-
-	assertNoInnerHTML(Object.values(nodes));
-});
-
-test('domainBind posts domain + namespace and re-fetches the list on success', async () => {
-	const { client, calls, liveRegion } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-	});
-
-	const result = await client.domainBind('blog.example.test', 'icann');
-
-	assert.equal(result, true, 'a successful bind resolves true');
-	const post = calls.find((c) => c.url === DEFAULT_ENDPOINTS.domain_bind);
-	assert.ok(post, 'the bind route is requested');
-	assert.equal(post.options.method, 'POST');
-	assert.equal(post.options.headers['X-WP-Nonce'], 'wp-rest-nonce');
-	assert.equal(post.options.headers['Content-Type'], 'application/json');
-	assert.deepEqual(JSON.parse(post.options.body), { domain: 'blog.example.test', namespace: 'icann' });
-	assert.match(liveRegion.textContent, /bound/i);
-	// A successful bind re-fetches the list so the panel resyncs.
-	assert.ok(
-		calls.some((c) => c.url === DEFAULT_ENDPOINTS.domain_list),
-		'the domain list re-fetches after a bind'
-	);
-});
-
-test('domainBind refuses an empty domain without touching a route', async () => {
-	const { client, calls } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-	});
-
-	const result = await client.domainBind('   ', 'icann');
-
-	assert.equal(result, false, 'an empty domain is refused client-side');
-	assert.equal(
-		calls.some((c) => c.url.indexOf('/domains/bind') !== -1),
-		false,
-		'a refused bind never reaches the bind route'
-	);
-});
-
-test('domainVerify posts once then bounded-polls the list until the binding is active', async () => {
-	const { client, calls, timers, liveRegion } = load({
-		config: {
-			poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 },
-			verify_poll: { intervalMs: 50, maxAttempts: 3 },
-		},
-		script: {
-			domain_list: [
-				{ listed: true, status: 'ok', domains: [defaultDomainRow()], refusal: null },
-				{ listed: true, status: 'ok', domains: [defaultDomainRow({ status: 'active' })], refusal: null },
-			],
-		},
-	});
-
-	const pending = client.domainVerify('99');
-	await tick();
-	timers.runNext();
-	await tick();
-
-	const result = await pending;
-
-	assert.equal(result, true, 'a verified binding resolves true');
-	assert.equal(
-		calls.filter((c) => c.url === DEFAULT_ENDPOINTS.domain_verify).length,
-		1,
-		'only a single verify POST is sent; confirmation comes from the list poll'
-	);
-	assert.equal(
-		calls.filter((c) => c.url === DEFAULT_ENDPOINTS.domain_list).length,
-		2,
-		'the list is polled until the binding flips to active'
-	);
-	assert.match(liveRegion.textContent, /verified/i);
-});
-
-test('domainVerify gives up once its bounded poll budget is exhausted', async () => {
-	const { client, calls, timers, liveRegion } = load({
-		config: {
-			poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 },
-			verify_poll: { intervalMs: 25, maxAttempts: 3 },
-		},
-		script: { domain_list: defaultDomainList() },
-	});
-
-	const pending = client.domainVerify('99');
-	await tick();
-	timers.runNext();
-	await tick();
-	timers.runNext();
-	await tick();
-	timers.runNext();
-	await tick();
-
-	const result = await pending;
-
-	assert.equal(result, false, 'the bounded poll resolves false once the budget is gone');
-	assert.equal(
-		calls.filter((c) => c.url === DEFAULT_ENDPOINTS.domain_list).length,
-		3,
-		'the list is polled exactly maxAttempts times'
-	);
-	assert.match(liveRegion.textContent, /pending/i);
-});
-
-test('domainDelete posts the domain id and re-fetches the list on success', async () => {
-	const { client, calls, liveRegion } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-	});
-
-	const result = await client.domainDelete('99');
-
-	assert.equal(result, true, 'a successful delete resolves true');
-	const post = calls.find((c) => c.url === DEFAULT_ENDPOINTS.domain_delete);
-	assert.ok(post, 'the delete route is requested');
-	assert.equal(post.options.method, 'POST');
-	assert.equal(post.options.headers['X-WP-Nonce'], 'wp-rest-nonce');
-	assert.deepEqual(JSON.parse(post.options.body), { domain_id: '99' });
-	assert.match(liveRegion.textContent, /deleted/i);
-	assert.ok(
-		calls.some((c) => c.url === DEFAULT_ENDPOINTS.domain_list),
-		'the domain list re-fetches after a delete'
-	);
-});
 
 test('domainDns fetches the delegation records and renders accessible copy', async () => {
 	const { client, calls, nodes, liveRegion } = load({
@@ -2249,6 +2080,47 @@ test('renderDomainDns renders managed HNS on-chain guidance with nameservers and
 	assert.ok(texts.includes('DNSSEC: secure'), 'the DNSSEC state renders verbatim');
 	assert.ok(texts.includes('DNSSEC error: dnssec-broken'), 'the DNSSEC error renders verbatim');
 	assert.equal(texts.includes(`Update your domain's nameservers at your registrar.`), false, 'HNS does not show the ICANN registrar copy');
+
+	assertNoInnerHTML(Object.values(nodes));
+});
+
+test('renderDomainDns renders HNS on-chain-managed guidance from server-returned records only', async () => {
+	// An HNS binding the server reports as onchain_managed: its DNS is served
+	// by an external on-chain contract, so there is no Pinner-managed zone to
+	// point at. The card must never claim Pinner manages the DNS and must show
+	// only the server-returned DNSLink/TLSA guidance.
+	const domain_dns = {
+		ok: true,
+		status: 'ok',
+		domain: Object.assign(
+			defaultDomainRow({ domain: 'name/', namespace: 'hns', dns_hosting_enabled: true, status: 'onchain_managed' }),
+			{
+				delegation: null,
+				checks: [
+					{ name: 'dnslink', ok: false, message: '', expected: 'dnslink=/ipns/k-ipns-7', found: '' },
+					{ name: 'tlsa', ok: false, message: '', expected: '_443._tcp.name/ TLSA 3 1 1 abcdef', found: '' },
+				],
+			},
+		),
+		refusal: null,
+	};
+	const { client, nodes } = load({
+		script: { domain_dns },
+		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
+	});
+
+	await client.domainDns('99');
+
+	const texts = collectAllText(nodes['.cast-domain-dns-copy']);
+	assert.ok(
+		texts.includes('This domain is managed on-chain, so its DNS records are set on-chain, not by Pinner.'),
+		'the on-chain-managed explanation renders'
+	);
+	assert.ok(texts.includes('dnslink=/ipns/k-ipns-7'), 'the server-returned DNSLink value renders');
+	assert.ok(texts.includes('_443._tcp.name/ TLSA 3 1 1 abcdef'), 'the server-returned TLSA value renders');
+	assert.equal(texts.includes('No delegation records are available for name/.'), false, 'the nil-delegation miss is not shown for an on-chain binding');
+	assert.equal(texts.includes('Pinner manages your DNS, so the authoritative side is handled for you.'), false, 'on-chain-managed never claims Pinner manages DNS');
+	assert.equal(texts.includes('Publish the records below in the DNS/records area of your HNS wallet (on-chain).'), false, 'the managed-HNS framing is absent for an on-chain binding');
 
 	assertNoInnerHTML(Object.values(nodes));
 });
@@ -2410,7 +2282,7 @@ test('domainValidate shows Validating… while in flight and blocks a second cal
 	resolveFetch({ ok: true, status: 200, json: async () => defaultDomainValidate() });
 	const result = await first;
 	assert.equal(result, true, 'the first validate completes once the fetch resolves');
-	assert.equal(markers[0].textContent, 'Validate DNS', 'the button label is restored');
+	assert.equal(markers[0].textContent, 'I made the changes — check again', 'the button label is restored');
 	assert.equal(markers[0].disabled, false, 'the button is re-enabled');
 });
 
@@ -2474,87 +2346,32 @@ test('domainSsl fetches the SSL status and renders the SSL copy', async () => {
 	assert.equal(nodes['.cast-domain-ssl-label'].textContent, 'SSL active');
 });
 
-test('domainPlatform and domainAvailability fetch the catalog routes', async () => {
-	const { client, calls } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-	});
-
-	const platform = await client.domainPlatform();
-	const availability = await client.domainAvailability('my-site');
-
-	assert.equal(platform, true, 'the platform catalog read resolves true');
-	assert.equal(availability, true, 'the availability read resolves true');
-
-	const platformReq = calls.find((c) => c.url === DEFAULT_ENDPOINTS.domain_platform);
-	assert.ok(platformReq, 'the platform route is requested');
-	assert.equal(platformReq.options.method, 'GET');
-
-	const availabilityReq = calls.find((c) => c.url === DEFAULT_ENDPOINTS.domain_availability);
-	assert.ok(availabilityReq, 'the availability route is requested');
-	assert.equal(availabilityReq.options.method, 'GET');
-	assert.equal(availabilityReq.options.headers['X-WP-Nonce'], 'wp-rest-nonce');
-});
-
-test('a data-domain-action marker fires its mapped domain route', async () => {
-	const markers = [
-		makeDomainMarker('bind', { 'data-domain': 'new.example.test', 'data-domain-namespace': 'icann' }),
-	];
-	const { calls } = load({
-		markers,
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-	});
-
-	markers[0].click();
-	await tick();
-
-	const post = calls.find((c) => c.url === DEFAULT_ENDPOINTS.domain_bind);
-	assert.ok(post, 'the bind route is requested through the marker');
-	assert.deepEqual(JSON.parse(post.options.body), { domain: 'new.example.test', namespace: 'icann' });
-});
-
-test('a forged data-domain-action marker is inert when its action is unknown', async () => {
-	const forged = makeDomainMarker('wreck');
-	const { calls } = load({
-		markers: [forged],
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-	});
-
-	forged.click();
-	await tick();
-
-	assert.equal(
-		calls.some((c) => c.url.indexOf('/domains/') !== -1),
-		false,
-		'a forged domain marker never reaches any domain route'
-	);
-});
-
 test('domain operations are inert without the localized nonce', async () => {
 	const { client, calls } = load({
 		config: { nonce: null, poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
 	});
 
-	const listed = await client.domainList();
-	const bound = await client.domainBind('a.example.test', 'icann');
+	const dns = await client.domainDns('site.example.test');
+	const validated = await client.domainValidate('99');
 
-	assert.equal(listed, false, 'a missing nonce refuses the list');
-	assert.equal(bound, false, 'a missing nonce refuses the bind');
+	assert.equal(dns, false, 'a missing nonce refuses the DNS read');
+	assert.equal(validated, false, 'a missing nonce refuses the validation');
 	assert.equal(calls.length, 0, 'nothing is ever requested without the localized nonce');
 });
 
 test('domain operations are inert when the route endpoint is missing', async () => {
 	const endpoints = Object.assign({}, DEFAULT_ENDPOINTS);
-	delete endpoints.domain_list;
-	delete endpoints.domain_bind;
+	delete endpoints.domain_dns;
+	delete endpoints.domain_validate;
 	const { client, calls } = load({
 		config: { endpoints, poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
 	});
 
-	const listed = await client.domainList();
-	const bound = await client.domainBind('a.example.test', 'icann');
+	const dns = await client.domainDns('site.example.test');
+	const validated = await client.domainValidate('99');
 
-	assert.equal(listed, false, 'a missing endpoint refuses the list');
-	assert.equal(bound, false, 'a missing endpoint refuses the bind');
+	assert.equal(dns, false, 'a missing endpoint refuses the DNS read');
+	assert.equal(validated, false, 'a missing endpoint refuses the validation');
 	assert.equal(
 		calls.some((c) => c.url.indexOf('/domains/') !== -1),
 		false,
@@ -2610,402 +2427,714 @@ test('can("artifact") permits the resume-with-same-CID for an awaiting run', () 
 	assert.equal(client.can('artifact', statusWith({ run_status: 'paused', identity: null })), false, 'a plain paused run cannot');
 });
 
-test('renderWebsiteCard reveals the card and quotes the preserved CID while awaiting', async () => {
-	// Auto-poll is off AND the init status fetch is scripted to the same
-	// awaiting status the test renders, so the asset's one-shot init read can
-	// never race in a non-awaiting default that hides the card under test.
-	const { client, nodes } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-		script: { status: awaitingStatus() },
+
+/* ------------------------ address wizard (S5) ---------------------------- */
+
+/** A status carrying a persisted first-publish destination. */
+function destinationStatus(destination, overrides) {
+	return statusWith(
+		Object.assign(
+			{
+				destination: {
+					lifecycle: 'confirmed',
+					destination:
+						destination || {
+							source: 'custom',
+							domain: 'site.example.test',
+							namespace: 'icann',
+							dns_hosting_enabled: true,
+							platform_domain: null,
+							platform_namespace: null,
+							generate: null,
+							label: null,
+							website_id: null,
+						},
+				},
+			},
+			overrides || {}
+		)
+	);
+}
+
+/** A native source radio double the wizard orchestrator toggles. */
+function makeAddressRadio(value, checked) {
+	const node = makeNode('cast-address-source-input');
+	node.value = value;
+	node.checked = !!checked;
+	node.focus = function () {
+		this.focused = true;
+	};
+	return node;
+}
+
+test('applyStatus renders the address summary without force-closing the wizard', async () => {
+	const draft = destinationStatus(null, {
+		destination: {
+			lifecycle: 'draft',
+			destination: {
+				source: 'custom',
+				domain: 'site.example.test',
+				namespace: 'icann',
+				dns_hosting_enabled: true,
+				platform_domain: null,
+				platform_namespace: null,
+				generate: null,
+				label: null,
+				website_id: null,
+			},
+		},
+	});
+	const { nodes } = load({
+		script: { status: draft },
 	});
 
-	// Awaiting: card visible, CID quoted, picker fetched and rendered.
-	client.renderWebsiteCard(awaitingStatus());
 	await tick();
 
-	assert.equal(nodes['.cast-website-card'].hidden, false, 'the card is revealed while awaiting');
-	assert.equal(nodes['.cast-website-cid'].textContent, 'Preserved CID: QmParkedCid');
-	assert.equal(nodes['.cast-website-picker'].children.length, 1, 'the picker renders rows from the list');
-	assert.equal(nodes['.cast-website-link-empty'].hidden, true, 'a populated list hides the empty state');
-
-	// A status that un-parks hides the card.
-	client.renderWebsiteCard(statusWith({ run_status: 'not_started', run_active: false, awaiting_website: false }));
-	assert.equal(nodes['.cast-website-card'].hidden, true, 'the card hides once the run un-parks');
+	assert.equal(nodes['.cast-address-source'].textContent, 'Your own domain');
+	assert.equal(nodes['.cast-address-value'].textContent, 'site.example.test');
+	assert.equal(nodes['.cast-address-wizard'].hidden, false, 'a status paint never force-closes the wizard while the choice is a draft');
 });
 
-test('renderWebsiteCard renders the empty-state for a bound-free website list', async () => {
-	const { client, nodes } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-		script: { website_available: { listed: true, status: 'ok', websites: [], refusal: null } },
+test('a confirmed status never opens the mutation wizard', async () => {
+	const review = Object.assign(makeNode('cast-address-review'), { 'data-cast-address-action': 'review' });
+	const { nodes } = load({
+		addressControls: [review],
+		initialHidden: ['.cast-address-wizard'],
+		script: { status: destinationStatus() }, // lifecycle 'confirmed'
 	});
 
-	client.renderWebsiteCard(awaitingStatus());
+	await tick();
+	review.click();
 	await tick();
 
-	assert.equal(nodes['.cast-website-picker'].children.length, 0);
-	assert.equal(nodes['.cast-website-link-empty'].hidden, false, 'an empty list shows the empty state');
+	assert.equal(nodes['.cast-address-wizard'].hidden, true, 'a stale confirmed status never opens the wizard');
 });
 
-test('an empty hostname requires the explicit auto-generate confirmation before any create POST', async () => {
-	const { client, nodes, websiteMarkers, calls } = load({
+test('a polled confirmed status closes an open wizard and blocks the confirm submit', async () => {
+	const confirm = Object.assign(makeNode('cast-address-confirm'), { 'data-cast-address-action': 'confirm' });
+	const draft = destinationStatus(null, {
+		destination: {
+			lifecycle: 'draft',
+			destination: {
+				source: 'custom',
+				domain: 'site.example.test',
+				namespace: 'icann',
+				dns_hosting_enabled: true,
+				platform_domain: null,
+				platform_namespace: null,
+				generate: null,
+				label: null,
+				website_id: null,
+			},
+		},
+	});
+	const { calls, nodes, client } = load({
+		addressControls: [confirm],
+		addressSourceRadios: [makeAddressRadio('custom', true)],
+		idNodes: {
+			'cast-address-custom-domain': Object.assign(makeNode('cast-address-custom-domain'), { value: 'site.example.test' }),
+			'cast-address-custom-namespace': Object.assign(makeNode('cast-address-custom-namespace'), { value: 'icann' }),
+		},
 		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-		websiteMarkers: [makeWebsiteMarker('create'), makeWebsiteMarker('create-confirm')],
+		script: { status: draft },
 	});
 
-	client.renderWebsiteCard(awaitingStatus());
+	await tick();
+	client.openAddressWizard();
+	await tick();
+	assert.equal(nodes['.cast-address-wizard'].hidden, false, 'the wizard opens while the choice is a draft');
+
+	// A later poll reports the choice confirmed elsewhere: the mutation
+	// surface freezes.
+	client.applyStatus(destinationStatus());
+	await tick();
+	assert.equal(nodes['.cast-address-wizard'].hidden, true, 'the polled confirmed status closes the wizard');
+
+	confirm.click();
 	await tick();
 
-	// Empty hostname: first click only reveals the confirmation — no POST.
-	// The match is the exact create route: renderWebsiteCard already fetched
-	// the /website/available picker (a GET), which a broad '/website' URL
-	// substring would wrongly count as a POST.
-	assert.equal(Boolean(nodes['.cast-website-hostname'].value), false, 'the hostname input is empty');
-	websiteMarkers[0].click();
-	assert.equal(nodes['.cast-website-create-confirm'].hidden, false, 'the confirmation is revealed');
-	assert.equal(nodes['.cast-website-create-confirm'].textContent, 'Platform domain will be auto-generated — continue?');
 	assert.equal(
-		calls.filter((c) => c.url === DEFAULT_ENDPOINTS.website_create).length,
-		0,
-		'nothing was POSTed yet'
+		calls.some((c) => c.url === DEFAULT_ENDPOINTS.destination_save || c.url === DEFAULT_ENDPOINTS.destination_confirm),
+		false,
+		'no destination mutation is submitted for a frozen address'
 	);
-
-	// The explicit confirmation fires the create with the empty hostname.
-	websiteMarkers[1].click();
-	assert.equal(nodes['.cast-website-create-confirm'].hidden, true, 'the confirmation closes after accepting');
-	assert.equal(
-		JSON.parse(calls[calls.length - 1].options.body).hostname,
-		'',
-		'the confirmed create carries the empty hostname'
-	);
+	assert.match(nodes['.cast-address-wizard-error'].textContent, /can no longer be changed/i, 'the frozen refusal is stated');
 });
 
-test('a named hostname creates immediately without an extra confirmation', async () => {
-	const { client, nodes, websiteMarkers, calls } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-		websiteMarkers: [makeWebsiteMarker('create')],
+test('applyStatus leaves the choose prompt when no destination exists', async () => {
+	const { nodes } = load({
+		// The server paint renders the wizard hidden; the poll must not reveal it.
+		initialHidden: ['.cast-address-wizard'],
+		script: { status: statusWith({}) },
 	});
 
-	client.renderWebsiteCard(awaitingStatus());
 	await tick();
 
-	nodes['.cast-website-hostname'].value = 'shop.example.com';
-	websiteMarkers[0].click();
-
-	assert.equal(nodes['.cast-website-create-confirm'].hidden, true, 'a named hostname never asks for confirmation');
-	assert.equal(JSON.parse(calls[calls.length - 1].options.body).hostname, 'shop.example.com');
+	assert.equal(nodes['.cast-address-wizard'].hidden, true, 'no wizard revealed without a destination');
+	assert.equal(nodes['.cast-address-prompt'].hidden, false, 'the choose prompt stays the entry point');
 });
 
-test('a refused create surfaces the refusal on the card error line, not a success', async () => {
-	const { client, nodes, websiteMarkers } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-		script: { website_create: { created: false, status: 'refused', refusal: 'create_failed' } },
-		websiteMarkers: [makeWebsiteMarker('create-confirm')],
+test('the choose-address control opens the wizard and focuses the first choice', async () => {
+	const choose = Object.assign(makeNode('cast-address-choose'), { 'data-cast-address-action': 'choose' });
+	const radios = [makeAddressRadio('platform', false), makeAddressRadio('custom', false), makeAddressRadio('existing', false)];
+	const { nodes } = load({
+		addressControls: [choose],
+		addressSourceRadios: radios,
+		script: { status: statusWith({}) },
 	});
 
-	client.renderWebsiteCard(awaitingStatus());
+	await tick();
+	choose.click();
 	await tick();
 
-	websiteMarkers[0].click();
-	await tick();
-
-	assert.equal(nodes['.cast-website-error'].hidden, false, 'the refusal reveals the error line');
-	assert.equal(
-		nodes['.cast-website-error'].textContent,
-		'The website could not be created. Try again, or handle it in Pinner.'
-	);
+	assert.equal(nodes['.cast-address-wizard'].hidden, false, 'the wizard is revealed');
+	assert.equal(radios[0].focused, true, 'focus moves to the first choice');
 });
 
-test('a picker row link posts the website id and a refusal surfaces cleanly', async () => {
-	const { client, nodes, calls } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-		script: { website_link: { linked: false, status: 'refused', refusal: 'link_failed' } },
+test('switching the source radio reveals only that data-cast-address-branch', async () => {
+	const radios = [makeAddressRadio('platform', true), makeAddressRadio('custom', false), makeAddressRadio('existing', false)];
+	// Simulate the browser: checking a radio unchecks the others, then the
+	// wizard's own change handler (bound at init) runs.
+	const pick = (radio) => {
+		radios.forEach((other) => {
+			other.checked = other === radio;
+		});
+		if (radio.listeners.change) {
+			radio.listeners.change();
+		}
+	};
+	const { nodes } = load({
+		addressSourceRadios: radios,
+		// The server paint hides the non-checked source's branches.
+		initialHidden: ['[data-cast-address-branch="custom"]', '[data-cast-address-branch="existing"]'],
+		script: { status: statusWith({}) },
 	});
 
-	client.renderWebsiteCard(awaitingStatus());
 	await tick();
+	pick(radios[1]); // user picks "use a domain you own"
 
-	// The picker built a row button carrying the website id; click it.
-	const row = nodes['.cast-website-picker'].children[0].children[0];
-	row.click();
-	await tick();
-
-	const linkCall = calls.find((c) => c.url.indexOf('/website/link') !== -1);
-	assert.ok(linkCall, 'the link route was requested');
-	assert.equal(JSON.parse(linkCall.options.body).website_id, '66');
-	assert.equal(
-		nodes['.cast-website-error'].textContent,
-		'That website could not be linked — it may already belong to another workspace. Pick another, or handle it in Pinner.'
-	);
+	assert.equal(nodes['[data-cast-address-branch="custom"]'].hidden, false, 'the custom branch is revealed');
+	assert.equal(nodes['[data-cast-address-branch="platform"]'].hidden, true, 'the platform branch is hidden');
+	assert.equal(nodes['[data-cast-address-branch="existing"]'].hidden, true, 'the existing branch is hidden');
 });
 
-test('a link 409 conflict surfaces the friendly already-used copy, not a raw error', async () => {
-	const { client, nodes, websiteMarkers } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-		script: { website_link: { linked: false, status: 'refused', refusal: 'website_already_linked' } },
-		websiteMarkers: [makeWebsiteMarker('link', { 'data-website-id': '66' })],
-	});
-
-	client.renderWebsiteCard(awaitingStatus());
-	await tick();
-
-	websiteMarkers[0].click();
-	await tick();
-
-	assert.equal(nodes['.cast-website-error'].hidden, false, 'the conflict reveals the error line');
-	assert.equal(
-		nodes['.cast-website-error'].textContent,
-		'This website is already used by another workspace. Pick another, or handle it in Pinner.'
-	);
-});
-
-test('a create 409 workspace conflict surfaces the friendly already-linked copy', async () => {
-	const { client, nodes, websiteMarkers } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-		script: { website_create: { created: false, status: 'refused', refusal: 'workspace_already_linked' } },
-		websiteMarkers: [makeWebsiteMarker('create-confirm')],
-	});
-
-	client.renderWebsiteCard(awaitingStatus());
-	await tick();
-
-	websiteMarkers[0].click();
-	await tick();
-
-	assert.equal(nodes['.cast-website-error'].hidden, false, 'the conflict reveals the error line');
-	assert.equal(
-		nodes['.cast-website-error'].textContent,
-		'Your workspace already has a website linked. Handle it in Pinner, then try again.'
-	);
-});
-
-test('the guided card offers exactly the two paths — create and link — with no manual Dismiss', () => {
-	const { client, created } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-	});
-
-	// Build the client-side card (mid-poll park) and pin its structure: exactly
-	// the create + link paths, never a manual "handle it in Pinner / Dismiss"
-	// path.
-	const card = client.buildWebsiteCard();
-	const paths = card.children.filter(
-		(el) => el.className && el.className.split(' ').indexOf('cast-website-path') !== -1
-	);
-
-	assert.equal(paths.length, 2, 'the card has exactly two paths');
-	assert.equal(paths[0].className, 'cast-website-path cast-website-path-create');
-	assert.equal(paths[1].className, 'cast-website-path cast-website-path-link');
-
-	// No dismiss action survives anywhere in the built card.
-	const dismissMarkers = created.filter(
-		(el) => el.getAttribute && el.getAttribute('data-website-action') === 'dismiss'
-	);
-	assert.equal(dismissMarkers.length, 0, 'no dismiss action exists on the card');
-	assert.equal(card.hidden, false, 'the card is revealed while awaiting');
-});
-
-test('the website card build never uses innerHTML and honors the nonce/allowlist', async () => {
-	const { client, created, calls, nodes } = load({ config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } } });
-
-	// Build the client-side card (mid-poll park) into the root placeholder.
-	client.renderWebsiteCard(awaitingStatus());
-	await tick();
-
-	assertNoInnerHTML(created);
-	assertNoInnerHTML(Object.values(nodes));
-
-	// The picker read flew with the nonce header against the allowlisted route.
-	const availCall = calls.find((c) => c.url.indexOf('/website/available') !== -1);
-	assert.ok(availCall, 'the website picker read is requested while awaiting');
-	assert.equal(availCall.options.headers['X-WP-Nonce'], 'wp-rest-nonce');
-
-	// Without the allowlist the picker read is inert.
-	const client2load = load({ config: { website_actions: [] } });
-	client2load.client.renderWebsiteCard(awaitingStatus());
-	await tick();
-	assert.equal(
-		client2load.calls.filter((c) => c.url.indexOf('/website') !== -1).length,
-		0,
-		'no allowlisted action means no website request'
-	);
-});
-
-test('a successful create re-fetches status AND the available list and hides the awaiting card', async () => {
-	const { client, nodes, websiteMarkers, calls } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-		// The init read reports the parked wait; the post-create refresh
-		// reports the run un-parked (identity written through server-side).
+test('selecting the existing branch fetches the account sites into the picker', async () => {
+	const radios = [makeAddressRadio('platform', false), makeAddressRadio('custom', false), makeAddressRadio('existing', false)];
+	const select = Object.assign(makeNode('cast-address-existing-website'), { value: '' });
+	const { calls, nodes } = load({
+		addressSourceRadios: radios,
+		idNodes: { 'cast-address-existing-website': select },
+		initialHidden: ['.cast-address-existing-loading', '.cast-address-existing-error'],
 		script: {
-			status: [
-				awaitingStatus(),
-				statusWith({ run_status: 'not_started', run_active: false, awaiting_website: false }),
-			],
-			website_create: {
-				created: true,
-				status: 'created',
-				website_id: '77',
-				website_name: 'sub.example.com',
-				domain: 'sub.example.com',
+			status: statusWith({}),
+			website_available: {
+				listed: true,
+				status: 'ok',
+				websites: [{ website_id: '66', domain: 'blog.example.com', status: 'active', target_hash: 'QmA', target_type: 'ipfs' }],
 				refusal: null,
 			},
 		},
-		websiteMarkers: [makeWebsiteMarker('create-confirm')],
 	});
 
-	client.renderWebsiteCard(awaitingStatus());
+	await tick();
+	radios[2].checked = true;
+	radios[2].listeners.change();
+
+	assert.equal(nodes['.cast-address-existing-loading'].hidden, false, 'the loading state shows while the picker fetch is in flight');
 	await tick();
 
-	const statusBefore = calls.filter((c) => c.url.indexOf('/publish/status') !== -1).length;
-	const availBefore = calls.filter((c) => c.url.indexOf('/website/available') !== -1).length;
-
-	websiteMarkers[0].click();
-	await tick();
-
-	// Status AND the available list were both re-fetched right after the
-	// create — the card never waits for the next poll tick.
-	assert.equal(
-		calls.filter((c) => c.url.indexOf('/publish/status') !== -1).length,
-		statusBefore + 1,
-		'status is re-fetched immediately after a successful create'
-	);
-	assert.equal(
-		calls.filter((c) => c.url.indexOf('/website/available') !== -1).length,
-		availBefore + 1,
-		'the available list is re-fetched immediately after a successful create'
-	);
-	// The re-render hides the awaiting card as soon as the fresh status
-	// un-parks — the just-created website means the wait is over.
-	assert.equal(nodes['.cast-website-card'].hidden, true, 'the awaiting card hides once the run un-parks');
-	assert.equal(nodes['.cast-website-result'].textContent, 'Website created — resuming your publish.');
+	assert.equal(calls.some((c) => c.url === DEFAULT_ENDPOINTS.website_available), true, 'the picker fetch fires when the branch is chosen');
+	assert.equal(nodes['.cast-address-existing-loading'].hidden, true, 'the loading state clears when the list lands');
+	assert.equal(nodes['.cast-address-existing-error'].hidden, true, 'no error state on success');
+	assert.equal(select.children.length, 1, 'the fetched site is listed');
+	assert.equal(select.children[0].value, '66');
 });
 
-test('a successful link re-fetches status AND the available list and hides the awaiting card', async () => {
-	const { client, nodes, calls } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
+test('the existing-site picker shows a distinct error state when the fetch fails', async () => {
+	const radios = [makeAddressRadio('platform', false), makeAddressRadio('custom', false), makeAddressRadio('existing', false)];
+	const select = Object.assign(makeNode('cast-address-existing-website'), { value: '' });
+	const { nodes } = load({
+		addressSourceRadios: radios,
+		idNodes: { 'cast-address-existing-website': select },
+		initialHidden: ['.cast-address-existing-loading', '.cast-address-existing-error'],
 		script: {
-			status: [
-				awaitingStatus(),
-				statusWith({ run_status: 'not_started', run_active: false, awaiting_website: false }),
-			],
+			status: statusWith({}),
+			website_available: { __httpError: true, status: 500 },
 		},
 	});
 
-	client.renderWebsiteCard(awaitingStatus());
+	await tick();
+	radios[2].checked = true;
+	radios[2].listeners.change();
 	await tick();
 
-	const statusBefore = calls.filter((c) => c.url.indexOf('/publish/status') !== -1).length;
-	const availBefore = calls.filter((c) => c.url.indexOf('/website/available') !== -1).length;
-
-	// The picker built a row button carrying the website id; click it to link.
-	const row = nodes['.cast-website-picker'].children[0].children[0];
-	row.click();
-	await tick();
-
-	assert.equal(
-		calls.filter((c) => c.url.indexOf('/publish/status') !== -1).length,
-		statusBefore + 1,
-		'status is re-fetched immediately after a successful link'
-	);
-	assert.equal(
-		calls.filter((c) => c.url.indexOf('/website/available') !== -1).length,
-		availBefore + 1,
-		'the available list is re-fetched immediately after a successful link'
-	);
-	assert.equal(nodes['.cast-website-card'].hidden, true, 'the awaiting card hides once the run un-parks');
-	// The "Linking your website…" spinner never wedges: it is replaced on
-	// completion.
-	assert.equal(nodes['.cast-website-result'].textContent, 'Website linked — resuming your publish.');
+	assert.equal(nodes['.cast-address-existing-error'].hidden, false, 'the error state is visible after a failed fetch');
+	assert.match(nodes['.cast-address-existing-error'].textContent, /could not load/i, 'the error names the failure');
+	assert.equal(nodes['.cast-address-existing-loading'].hidden, true, 'the loading state clears on failure');
+	assert.equal(select.children.length, 0, 'a failed fetch lists nothing');
 });
 
-test('a link 409 refusal shows the copy, clears the spinner, refreshes status+list and reveals the real linked state', async () => {
-	const { client, nodes, websiteMarkers, calls } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-		// The real state is already linked: the fresh status un-parks the run.
+test('the existing-site picker shows the empty state when the account has no sites', async () => {
+	const radios = [makeAddressRadio('platform', false), makeAddressRadio('custom', false), makeAddressRadio('existing', false)];
+	const select = Object.assign(makeNode('cast-address-existing-website'), { value: '' });
+	const { nodes } = load({
+		addressSourceRadios: radios,
+		idNodes: { 'cast-address-existing-website': select },
+		initialHidden: ['.cast-address-existing-loading', '.cast-address-existing-error', '.cast-address-existing-empty'],
 		script: {
-			status: [
-				awaitingStatus(),
-				statusWith({ run_status: 'not_started', run_active: false, awaiting_website: false }),
-			],
-			website_link: { linked: false, status: 'refused', refusal: 'website_already_linked' },
+			status: statusWith({}),
+			website_available: { listed: true, status: 'ok', websites: [], refusal: null },
 		},
-		websiteMarkers: [makeWebsiteMarker('link', { 'data-website-id': '66' })],
 	});
 
-	client.renderWebsiteCard(awaitingStatus());
+	await tick();
+	radios[2].checked = true;
+	radios[2].listeners.change();
 	await tick();
 
-	const statusBefore = calls.filter((c) => c.url.indexOf('/publish/status') !== -1).length;
-	const availBefore = calls.filter((c) => c.url.indexOf('/website/available') !== -1).length;
-
-	assert.equal(nodes['.cast-website-result'].textContent, '', 'the card starts with no spinner line');
-
-	websiteMarkers[0].click();
-	assert.equal(nodes['.cast-website-result'].textContent, 'Linking your website…', 'the spinner shows while the link is in flight');
-	await tick();
-
-	// The friendly 409-refusal copy is shown...
-	assert.equal(nodes['.cast-website-error'].hidden, false, 'the 409 refusal reveals the error line');
-	assert.equal(
-		nodes['.cast-website-error'].textContent,
-		'This website is already used by another workspace. Pick another, or handle it in Pinner.'
-	);
-	// ...AND status + available list were re-fetched, so the card shows the
-	// real (already linked) state instead of a dead awaiting card.
-	assert.equal(
-		calls.filter((c) => c.url.indexOf('/publish/status') !== -1).length,
-		statusBefore + 1,
-		'status is re-fetched after a link refusal'
-	);
-	assert.equal(
-		calls.filter((c) => c.url.indexOf('/website/available') !== -1).length,
-		availBefore + 1,
-		'the available list is re-fetched after a link refusal'
-	);
-	// The "Linking…" spinner never wedges: it is cleared once the refusal lands.
-	assert.equal(nodes['.cast-website-result'].textContent, '', 'the Linking… spinner is cleared on refusal');
-	// The fresh status shows the workspace is already linked.
-	assert.equal(nodes['.cast-website-card'].hidden, true, 'the refreshed status un-parks the run (real state is linked)');
+	assert.equal(nodes['.cast-address-existing-empty'].hidden, false, 'the empty note shows when no sites exist');
+	assert.equal(nodes['.cast-address-existing-error'].hidden, true, 'an empty list is not an error');
+	assert.equal(nodes['.cast-address-existing-loading'].hidden, true, 'the loading state clears');
 });
 
-test('a refused create clears the spinner and re-fetches status+list while the card stays awaiting', async () => {
-	const { client, nodes, websiteMarkers, calls } = load({
-		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
-		// The create was refused, so the fresh status still reports the wait.
-		script: {
-			status: awaitingStatus(),
-			website_create: { created: false, status: 'refused', refusal: 'create_failed' },
-		},
-		websiteMarkers: [makeWebsiteMarker('create-confirm')],
+test('a normal status poll does not hide an open unconfirmed wizard or discard its fields', async () => {
+	const choose = Object.assign(makeNode('cast-address-choose'), { 'data-cast-address-action': 'choose' });
+	const radios = [makeAddressRadio('platform', false), makeAddressRadio('custom', true), makeAddressRadio('existing', false)];
+	const domain = Object.assign(makeNode('cast-address-custom-domain'), { value: 'shop.example.com' });
+	const { nodes, client } = load({
+		addressControls: [choose],
+		addressSourceRadios: radios,
+		idNodes: { 'cast-address-custom-domain': domain },
+		script: { status: statusWith({}) },
 	});
 
-	client.renderWebsiteCard(awaitingStatus());
+	await tick();
+	choose.click();
+	await tick();
+	assert.equal(nodes['.cast-address-wizard'].hidden, false, 'the wizard is open');
+
+	// A routine poll lands while the user is mid-wizard.
+	client.applyStatus(statusWith({}));
+
+	assert.equal(nodes['.cast-address-wizard'].hidden, false, 'the poll must not hide the open wizard');
+	assert.equal(domain.value, 'shop.example.com', 'the poll must not discard field selections');
+});
+
+test('the platform review says Pinner will create a free address', async () => {
+	const radios = [makeAddressRadio('platform', true), makeAddressRadio('custom', false), makeAddressRadio('existing', false)];
+	const { nodes } = load({
+		addressSourceRadios: radios,
+		script: { status: statusWith({}) },
+	});
+
+	await tick();
+	radios[0].listeners.change();
 	await tick();
 
-	const statusBefore = calls.filter((c) => c.url.indexOf('/publish/status') !== -1).length;
-	const availBefore = calls.filter((c) => c.url.indexOf('/website/available') !== -1).length;
+	assert.equal(nodes['.cast-address-review-box'].hidden, false, 'the review is shown for a valid platform choice');
+	assert.match(nodes['.cast-address-review-copy'].textContent, /Pinner will create a free address/i);
+	assert.doesNotMatch(nodes['.cast-address-review-copy'].textContent, /available at/i, 'a generated address is never phrased as "available at …"');
+});
 
-	websiteMarkers[0].click();
+test('the custom review names the domain the user typed', async () => {
+	const radios = [makeAddressRadio('platform', false), makeAddressRadio('custom', true), makeAddressRadio('existing', false)];
+	const idNodes = {
+		'cast-address-custom-domain': Object.assign(makeNode('cast-address-custom-domain'), { value: 'shop.example.com' }),
+		'cast-address-custom-namespace': Object.assign(makeNode('cast-address-custom-namespace'), { value: 'icann' }),
+	};
+	const { nodes } = load({
+		addressSourceRadios: radios,
+		addressDnsRadios: [Object.assign(makeAddressRadio('managed', true), { className: 'cast-address-dns-input' })],
+		idNodes,
+		script: { status: statusWith({}) },
+	});
+
+	await tick();
+	radios[1].listeners.change();
 	await tick();
 
-	// The refusal lands on the error line...
-	assert.equal(nodes['.cast-website-error'].hidden, false, 'the refusal reveals the error line');
+	assert.equal(nodes['.cast-address-review-box'].hidden, false);
 	assert.equal(
-		nodes['.cast-website-error'].textContent,
-		'The website could not be created. Try again, or handle it in Pinner.'
+		nodes['.cast-address-review-copy'].textContent,
+		'Your site will be available at shop.example.com. You cannot change this address after your first publish.'
 	);
-	// ...the "Creating…" spinner never wedges: it is cleared...
-	assert.equal(nodes['.cast-website-result'].textContent, '', 'the Creating… spinner is cleared on refusal');
-	// ...and status + available were re-fetched so the next render is fresh.
+});
+
+test('the custom wizard defaults to Pinner-managed DNS when no choice is made', async () => {
+	const radios = [makeAddressRadio('platform', false), makeAddressRadio('custom', true), makeAddressRadio('existing', false)];
+	const idNodes = {
+		'cast-address-custom-domain': Object.assign(makeNode('cast-address-custom-domain'), { value: 'shop.example.com' }),
+		'cast-address-custom-namespace': Object.assign(makeNode('cast-address-custom-namespace'), { value: 'icann' }),
+	};
+	const { client } = load({
+		addressSourceRadios: radios,
+		idNodes,
+		script: { status: statusWith({}) },
+	});
+
+	await tick();
+	const payload = client.buildAddressPayload();
+
+	assert.equal(payload.dns_hosting_enabled, true, 'dns_hosting_enabled defaults to managed (true)');
+});
+
+test('picking self-managed DNS in the advanced disclosure sends dns_hosting_enabled false', async () => {
+	const radios = [makeAddressRadio('platform', false), makeAddressRadio('custom', true), makeAddressRadio('existing', false)];
+	const dnsRadios = [
+		Object.assign(makeAddressRadio('managed', false), { className: 'cast-address-dns-input' }),
+		Object.assign(makeAddressRadio('self', true), { className: 'cast-address-dns-input' }),
+	];
+	const idNodes = {
+		'cast-address-custom-domain': Object.assign(makeNode('cast-address-custom-domain'), { value: 'shop.example.com' }),
+		'cast-address-custom-namespace': Object.assign(makeNode('cast-address-custom-namespace'), { value: 'hns' }),
+	};
+	const { client } = load({
+		addressSourceRadios: radios,
+		addressDnsRadios: dnsRadios,
+		idNodes,
+		script: { status: statusWith({}) },
+	});
+
+	await tick();
+	const payload = client.buildAddressPayload();
+
+	assert.equal(payload.dns_hosting_enabled, false, 'the explicit self-managed choice is honored');
+});
+
+test('the namespace note follows the chosen domain type', async () => {
+	const radios = [makeAddressRadio('platform', false), makeAddressRadio('custom', true), makeAddressRadio('existing', false)];
+	const namespaceSelect = Object.assign(makeNode('cast-address-custom-namespace'), { value: 'icann' });
+	const icannNote = Object.assign(makeNode('cast-address-namespace-note'), {
+		'data-cast-namespace-note': 'icann',
+		textContent: 'Pinner creates and manages the DNS records for this domain.',
+	});
+	const hnsNote = Object.assign(makeNode('cast-address-namespace-note'), {
+		'data-cast-namespace-note': 'hns',
+		textContent: 'For Handshake (HNS) names, the DNS records are held on-chain at the name’s parent. Pinner manages this for you, and the exact nameserver values may appear here later.',
+	});
+	const { client } = load({
+		addressSourceRadios: radios,
+		addressNamespaceNotes: [icannNote, hnsNote],
+		idNodes: {
+			'cast-address-custom-domain': Object.assign(makeNode('cast-address-custom-domain'), { value: 'shop.example.com' }),
+			'cast-address-custom-namespace': namespaceSelect,
+		},
+		script: { status: statusWith({}) },
+	});
+
+	await tick();
+	client.openAddressWizard();
+	await tick();
+	assert.equal(icannNote.hidden, false, 'the ICANN note is shown for the default namespace');
+	assert.equal(hnsNote.hidden, true, 'the HNS note is hidden until the namespace is HNS');
+
+	namespaceSelect.value = 'hns';
+	namespaceSelect.listeners.change();
+	await tick();
+	assert.equal(hnsNote.hidden, false, 'switching to HNS reveals the HNS copy');
+	assert.equal(icannNote.hidden, true, '…and hides the ICANN copy');
+
+	namespaceSelect.value = 'icann';
+	namespaceSelect.listeners.change();
+	await tick();
+	assert.equal(icannNote.hidden, false, 'switching back restores the ICANN copy');
+	assert.equal(hnsNote.hidden, true, '…and hides the HNS copy again');
+});
+
+test('the pre-create payload never carries a HIP-5 choice', async () => {
+	const radios = [makeAddressRadio('platform', false), makeAddressRadio('custom', true), makeAddressRadio('existing', false)];
+	const dnsRadios = [Object.assign(makeAddressRadio('managed', true), { className: 'cast-address-dns-input' })];
+	const idNodes = {
+		'cast-address-custom-domain': Object.assign(makeNode('cast-address-custom-domain'), { value: 'acme.example' }),
+		'cast-address-custom-namespace': Object.assign(makeNode('cast-address-custom-namespace'), { value: 'hns' }),
+	};
+	const { client } = load({
+		addressSourceRadios: radios,
+		addressDnsRadios: dnsRadios,
+		idNodes,
+		script: { status: statusWith({}) },
+	});
+
+	await tick();
+	const payload = client.buildAddressPayload();
+
+	assert.ok(
+		!JSON.stringify(payload).toLowerCase().includes('hip-5'),
+		'HIP-5 is post-binding server state — never a pre-create field',
+	);
+	assert.deepEqual(
+		Object.keys(payload).sort(),
+		['dns_hosting_enabled', 'domain', 'namespace', 'source'],
+		'only the allowlisted pre-create fields are sent',
+	);
+});
+
+test('the existing review names the picked site', async () => {
+	const radios = [makeAddressRadio('platform', false), makeAddressRadio('custom', false), makeAddressRadio('existing', true)];
+	const select = Object.assign(makeNode('cast-address-existing-website'), { value: '66' });
+	const { nodes } = load({
+		addressSourceRadios: radios,
+		idNodes: { 'cast-address-existing-website': select },
+		script: {
+			status: statusWith({}),
+			website_available: {
+				listed: true,
+				status: 'ok',
+				websites: [{ website_id: '66', domain: 'blog.example.com', status: 'active', target_hash: 'QmA', target_type: 'ipfs' }],
+				refusal: null,
+			},
+		},
+	});
+
+	await tick();
+	radios[2].listeners.change(); // fires the picker fetch
+	await tick(); // the list lands
+	select.value = '66';
+	select.listeners.change();
+
+	assert.equal(nodes['.cast-address-review-box'].hidden, false);
+	assert.match(nodes['.cast-address-review-copy'].textContent, /available at blog\.example\.com/);
+});
+
+test('confirming a custom address saves, confirms, then starts the first publish', async () => {
+	const confirm = Object.assign(makeNode('cast-address-confirm'), { 'data-cast-address-action': 'confirm' });
+	const idNodes = {
+		'cast-address-custom-domain': Object.assign(makeNode('cast-address-custom-domain'), { value: 'site.example.test' }),
+		'cast-address-custom-namespace': Object.assign(makeNode('cast-address-custom-namespace'), { value: 'icann' }),
+	};
+	const dnsRadios = [
+		Object.assign(makeAddressRadio('managed', true), { className: 'cast-address-dns-input' }),
+		Object.assign(makeAddressRadio('self', false), { className: 'cast-address-dns-input' }),
+	];
+	const { calls, nodes } = load({
+		addressControls: [confirm],
+		addressSourceRadios: [makeAddressRadio('platform', false), makeAddressRadio('custom', true), makeAddressRadio('existing', false)],
+		addressDnsRadios: dnsRadios,
+		idNodes,
+		script: {
+			status: statusWith({}),
+			start: { queued: true, status: 'queued', run_id: 'r-first' },
+		},
+	});
+
+	await tick();
+	confirm.click();
+	await tick();
+	await tick();
+
+	const urls = calls.map((c) => c.url);
+	const saveIndex = urls.indexOf(DEFAULT_ENDPOINTS.destination_save);
+	const confirmIndex = urls.indexOf(DEFAULT_ENDPOINTS.destination_confirm);
+	const startIndex = urls.indexOf(DEFAULT_ENDPOINTS.start);
+	assert.ok(saveIndex !== -1, 'the destination save route is posted');
+	assert.ok(confirmIndex !== -1 && confirmIndex > saveIndex, 'the confirm route is posted after the save');
+	assert.ok(startIndex !== -1 && startIndex > confirmIndex, 'the first publish starts after the confirm');
+	const save = calls[saveIndex];
+	assert.equal(save.options.method, 'POST');
+	assert.deepEqual(JSON.parse(save.options.body), {
+		source: 'custom',
+		domain: 'site.example.test',
+		namespace: 'icann',
+		dns_hosting_enabled: true,
+	});
+	assert.equal(nodes['.cast-address-wizard'].hidden, true, 'the wizard closes after a confirmed address');
+});
+
+test('a refused save surfaces friendly copy and stays in the wizard', async () => {
+	const confirm = Object.assign(makeNode('cast-address-confirm'), { 'data-cast-address-action': 'confirm' });
+	const idNodes = {
+		'cast-address-custom-domain': Object.assign(makeNode('cast-address-custom-domain'), { value: 'site.example.test' }),
+		'cast-address-custom-namespace': Object.assign(makeNode('cast-address-custom-namespace'), { value: 'icann' }),
+	};
+	const { calls, nodes, client } = load({
+		addressControls: [confirm],
+		addressSourceRadios: [makeAddressRadio('platform', false), makeAddressRadio('custom', true), makeAddressRadio('existing', false)],
+		addressDnsRadios: [Object.assign(makeAddressRadio('managed', true), { className: 'cast-address-dns-input' })],
+		idNodes,
+		script: {
+			status: statusWith({}),
+			destination_save: { saved: false, status: 'refused', refusal: 'confirmed_cannot_change', lifecycle: 'confirmed' },
+		},
+	});
+
+	await tick();
+	client.openAddressWizard(); // the user is looking at the wizard
+	confirm.click();
+	await tick();
+
+	assert.match(nodes['.cast-address-wizard-error'].textContent, /can no longer be changed/i);
+	assert.equal(nodes['.cast-address-wizard'].hidden, false, 'the wizard stays open on a refusal');
 	assert.equal(
-		calls.filter((c) => c.url.indexOf('/publish/status') !== -1).length,
-		statusBefore + 1,
-		'status is re-fetched after a refused create'
+		calls.some((c) => c.url === DEFAULT_ENDPOINTS.destination_confirm || c.url === DEFAULT_ENDPOINTS.start),
+		false,
+		'no confirm or start fires after a refused save'
 	);
-	// The card stays awaiting, so the refresh re-renders it AND the render
-	// refreshes the picker again — the list is deterministically fresh twice.
+});
+
+test('the confirm button reads "Create address" while the site is not publish-ready', async () => {
+	const { nodes, client } = load({
+		addressSourceRadios: [makeAddressRadio('platform', true)],
+		script: { status: statusWith({ has_eligible_content: false }) },
+	});
+
+	await tick();
+	client.openAddressWizard();
+	await tick();
+
+	assert.equal(nodes['.cast-address-confirm'].textContent, 'Create address', 'no publish is promised while the server will refuse a start');
+	assert.doesNotMatch(nodes['.cast-address-confirm'].textContent, /publish/i, 'the button never claims a publish it will not attempt');
+});
+
+test('the confirm button reads "Create address and publish" when the site is publish-ready', async () => {
+	const { nodes, client } = load({
+		addressSourceRadios: [makeAddressRadio('platform', true)],
+		script: { status: statusWith({}) },
+	});
+
+	await tick();
+	client.openAddressWizard();
+	await tick();
+
+	assert.equal(nodes['.cast-address-confirm'].textContent, 'Create address and publish', 'a ready site keeps the create-and-publish promise');
+});
+
+test('confirming while not publish-ready saves and confirms the address without starting a publish', async () => {
+	const confirm = Object.assign(makeNode('cast-address-confirm'), { 'data-cast-address-action': 'confirm' });
+	const idNodes = {
+		'cast-address-custom-domain': Object.assign(makeNode('cast-address-custom-domain'), { value: 'site.example.test' }),
+		'cast-address-custom-namespace': Object.assign(makeNode('cast-address-custom-namespace'), { value: 'icann' }),
+	};
+	const { calls, nodes } = load({
+		addressControls: [confirm],
+		addressSourceRadios: [makeAddressRadio('platform', false), makeAddressRadio('custom', true), makeAddressRadio('existing', false)],
+		addressDnsRadios: [Object.assign(makeAddressRadio('managed', true), { className: 'cast-address-dns-input' })],
+		idNodes,
+		script: { status: statusWith({ has_eligible_content: false }) },
+	});
+
+	await tick();
+	confirm.click();
+	await tick();
+	await tick();
+
+	const urls = calls.map((c) => c.url);
+	assert.ok(urls.includes(DEFAULT_ENDPOINTS.destination_save), 'the address is saved');
+	assert.ok(urls.includes(DEFAULT_ENDPOINTS.destination_confirm), 'the address is confirmed');
+	assert.equal(urls.includes(DEFAULT_ENDPOINTS.start), false, 'no publish is attempted while the site is not publish-ready');
+	assert.match(nodes['.cast-address-wizard-result'].textContent, /address is confirmed/i, 'the result says the address is confirmed');
+	assert.match(nodes['.cast-address-wizard-result'].textContent, /publishable content/i, '…and truthfully names what unblocks publishing');
+	assert.doesNotMatch(nodes['.cast-address-wizard-result'].textContent, /queued/i, 'no publish is claimed as queued');
+});
+
+test('a no_eligible_content start refusal after a race surfaces clear copy', async () => {
+	const confirm = Object.assign(makeNode('cast-address-confirm'), { 'data-cast-address-action': 'confirm' });
+	const idNodes = {
+		'cast-address-custom-domain': Object.assign(makeNode('cast-address-custom-domain'), { value: 'site.example.test' }),
+		'cast-address-custom-namespace': Object.assign(makeNode('cast-address-custom-namespace'), { value: 'icann' }),
+	};
+	const { calls, nodes } = load({
+		addressControls: [confirm],
+		addressSourceRadios: [makeAddressRadio('platform', false), makeAddressRadio('custom', true), makeAddressRadio('existing', false)],
+		addressDnsRadios: [Object.assign(makeAddressRadio('managed', true), { className: 'cast-address-dns-input' })],
+		idNodes,
+		script: {
+			// The client saw a ready report and attempts the start…
+			status: statusWith({}),
+			// …but the server's first-publish gate refuses (content vanished in the race).
+			start: { queued: false, status: 'refused', refusal: 'no_eligible_content' },
+		},
+	});
+
+	await tick();
+	confirm.click();
+	await tick();
+	await tick();
+
+	assert.ok(calls.some((c) => c.url === DEFAULT_ENDPOINTS.start), 'the start was attempted from a ready report');
+	const spoken = nodes['.cast-address-wizard-result'].textContent + ' ' + nodes['.cast-address-wizard-error'].textContent;
+	assert.match(spoken, /address is confirmed/i, 'the confirmed address is acknowledged');
+	assert.match(spoken, /no publishable content/i, 'the refusal explains why nothing published');
+	assert.doesNotMatch(spoken, /could not be saved/i, 'the generic save-failure copy is not shown for a start refusal');
+});
+
+test('the existing branch lists the Pinner sites from the account', async () => {
+	const radios = [makeAddressRadio('platform', false), makeAddressRadio('custom', false), makeAddressRadio('existing', false)];
+	const select = Object.assign(makeNode('cast-address-existing-website'), { value: '' });
+	const { nodes } = load({
+		addressSourceRadios: radios,
+		idNodes: { 'cast-address-existing-website': select },
+		script: {
+			status: statusWith({}),
+			website_available: {
+				listed: true,
+				status: 'ok',
+				websites: [
+					{ website_id: '66', domain: 'blog.example.com', status: 'active', target_hash: 'QmA', target_type: 'ipfs' },
+					{ website_id: '77', domain: 'shop.example.com', status: 'active', target_hash: 'QmB', target_type: 'ipfs' },
+				],
+				refusal: null,
+			},
+		},
+	});
+
+	await tick();
+	// Picking the existing branch lists the account's sites on demand.
+	radios[2].checked = true;
+	radios[2].listeners.change();
+	await tick();
+
+	assert.equal(select.children.length, 2, 'both account sites are listed');
+	assert.equal(select.children[0].value, '66');
+	assert.equal(nodes['.cast-address-existing-empty'].hidden, true, 'the empty note hides when sites exist');
+});
+
+test('the copy control copies the value pinned in its data-cast-copy attribute', async () => {
+	const copied = [];
+	const copy = Object.assign(makeNode('cast-domain-copy'), { 'data-cast-copy': 'site.example.test' });
+	load({
+		copyControls: [copy],
+		navigator: { clipboard: { writeText: (value) => copied.push(value) } },
+		script: { status: statusWith({}) },
+	});
+
+	await tick();
+	copy.click();
+	await tick();
+
+	assert.deepEqual(copied, ['site.example.test'], 'the pinned value is copied, never a re-parsed one');
+});
+
+test('the connect-card validate marker fires the validate route with the domain id', async () => {
+	const marker = makeDomainMarker('validate', { 'data-domain-id': '99' });
+	const { calls } = load({
+		markers: [marker],
+		config: { poll: { intervalMs: 0, maxAttempts: 0, backoffMs: 0 } },
+		script: { status: statusWith({}) },
+	});
+
+	await tick();
+	marker.click();
+	await tick();
+
+	const validate = calls.find((c) => c.url === DEFAULT_ENDPOINTS.domain_validate);
+	assert.ok(validate, 'the validate route is requested');
+	assert.deepEqual(JSON.parse(validate.options.body), { domain_id: '99' });
+});
+
+test('a forged address control is inert when its action is unknown', async () => {
+	const forged = Object.assign(makeNode('cast-address-forged'), { 'data-cast-address-action': 'publish' });
+	const { calls } = load({
+		addressControls: [forged],
+		script: { status: statusWith({}) },
+	});
+
+	await tick();
+	forged.click();
+	await tick();
+
 	assert.equal(
-		calls.filter((c) => c.url.indexOf('/website/available') !== -1).length,
-		availBefore + 2,
-		'the available list is re-fetched (twice: the mutation refresh + the still-awaiting card render) after a refused create'
+		calls.some((c) => c.url === DEFAULT_ENDPOINTS.destination_save || c.url === DEFAULT_ENDPOINTS.destination_confirm),
+		false,
+		'an unknown address action never reaches a destination route'
 	);
-	assert.equal(nodes['.cast-website-card'].hidden, false, 'the card stays awaiting after a refused create');
 });

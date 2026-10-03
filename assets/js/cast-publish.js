@@ -21,13 +21,17 @@
  *     aria-live announcement) and the fired action is held busy so a duplicate
  *     click can never fire a second request; Cancel stays available whenever a
  *     live run may cancel it.
- *   - DOMAIN — the W3 "choose a domain" panel read: domainList() renders the
- *     bound domains, domainBind()/domainDelete() POST to the domain routes and
- *     re-fetch the list, domainVerify() re-checks a binding with a BOUNDED
- *     verification poll over the domain list, and domainDns()/domainSsl()/
- *     domainPlatform()/domainAvailability() read the delegation/catalog
- *     routes. Every domain call is gated by the localized domain-endpoint
- *     allowlist + nonce and lands through textContent.
+ *   - ADDRESS — the "Your site address" wizard: the choose/review prompts
+ *     open the inline wizard (three native radio choices with
+ *     branch-specific fields), and confirmAddress() saves the destination
+ *     (POST /publish/destination), confirms it
+ *     (POST /publish/destination/confirm) and, for a first publish, starts
+ *     the run — the plain review never re-types the domain.
+ *   - DOMAIN — the "Connect your domain" card (custom destinations only):
+ *     domainDns()/domainSsl() re-read the delegation/catalog routes and
+ *     domainValidate() re-checks the selected domain's records. Every domain
+ *     call is gated by the localized domain-endpoint allowlist + nonce and
+ *     lands through textContent.
  *
  * Security/accessibility contract (mirrored by tests/js/cast-publish.test.js):
  *
@@ -300,7 +304,12 @@
 		}
 
 		if ( status.onboarding_complete === false ) {
-			return 'Finish onboarding to publish';
+			// The setup slot is the one onboarding instruction and it is
+			// skipped-aware: a deliberately SKIPPED onboarding never instructs
+			// finishing it — the truthful next step is publishing.
+			return status.onboarding_skipped === true
+				? 'Onboarding skipped — publish when ready'
+				: 'Finish onboarding to publish';
 		}
 
 		if ( status.has_eligible_content === false ) {
@@ -396,7 +405,13 @@
 			case 'config':
 				return 'Publishing is unavailable until the configuration below is resolved.';
 			case 'setup':
-				return 'Finish onboarding to publish your site.';
+				// Skipped-aware, mirroring PublishDashboardView
+				// ::contextMessageFor: an incomplete onboarding says "finish
+				// onboarding"; a deliberately skipped one gives the truthful
+				// next step (publishing), never a finish instruction.
+				return status.onboarding_skipped === true
+					? 'You skipped onboarding, so there is nothing to finish — publish your site whenever you are ready.'
+					: 'Finish onboarding to publish your site.';
 			case 'no_content':
 				return 'Add publishable content, then publish your site to Pinner.';
 			default:
@@ -787,7 +802,10 @@
 			// The template keys these classes on the readiness IDENTIFIER
 			// ('ready', 'config', ...), not the severity level ('ok', 'error').
 			level.className = 'cast-publish-readiness-level cast-publish-level-' + readiness.readiness;
-			level.hidden = false;
+			// The 'setup' line is hidden: its label would repeat the context
+			// line's onboarding instruction verbatim — one clear instruction,
+			// not two. Every other readiness is shown.
+			level.hidden = readiness.readiness === 'setup';
 		}
 
 		// The workflow additions: the live progress bar, the "why publish"
@@ -816,9 +834,11 @@
 			setText( '.cast-publish-result', '' );
 		}
 
-		// The guided website card mirrors the awaiting flag: show/build while
-		// the run waits for a website, hide the moment it un-parks.
-		renderWebsiteCard( status );
+		// The address card mirrors the persisted destination: the summary
+		// (source label + address + the durable note) and the review prompt are
+		// re-derived from the latest report so a wizard confirm resyncs the
+		// card without a page refresh.
+		renderAddressCard( status );
 
 		// Keep the state in sync so the next action gate and poll decision see
 		// the report the card is actually showing.
@@ -1004,17 +1024,15 @@
 
 			if ( action === 'mode' ) {
 				value = button.getAttribute( 'data-cast-publish-value' );
-				// The current mode's button is marked active AND non-actionable
-				// (aria-pressed=true + disabled); every other option is clear
-				// and selectable again. Any in-flight request holds the whole
-				// group until it settles.
+				// The current mode's radio is checked AND non-actionable
+				// (checked + disabled); every other option is unchecked and
+				// selectable again. Any in-flight request holds the whole group
+				// until it settles.
 				if ( value === ( status ? status.mode : '' ) ) {
-					button.className = button.className.replace( /\s*is-active/, '' ) + ' is-active';
-					button.setAttribute( 'aria-pressed', 'true' );
+					button.checked = true;
 					button.disabled = true;
 				} else {
-					button.className = ( button.className || '' ).replace( /\s*is-active/, '' );
-					button.setAttribute( 'aria-pressed', 'false' );
+					button.checked = false;
 					button.disabled = busy !== null;
 				}
 				continue;
@@ -1511,603 +1529,15 @@
 		} );
 	}
 
-	/* ---------------------------- website card (S1) ------------------------ */
-
-	// The guided "sent — waiting for a website" choice card: only live while a
-	// parked first publish awaits a website, and only when the server localized
-	// the website routes + tight website_actions allowlist (nonce + endpoint
-	// required). The card renders server-side for an awaiting page load; a
-	// parked run caught mid-poll is built client-side into the root placeholder
-	// hosting the exact pinned copy. The card offers exactly two paths (create
-	// or link) — there is no "handle it in Pinner" escape. The resume-with-same-
-	// CID affordance lives in the action card so the parked operator always has
-	// that way out.
-	var websiteActions = config.website_actions || [];
-
-	/**
-	 * Whether a website client route may be used: the localized nonce, the
-	 * fetch surface, the route endpoint and the website-action allowlist must
-	 * all exist — a forged or partial localized payload can never reach a
-	 * website route.
-	 *
-	 * @param {string} routeName
-	 * @return {boolean}
-	 */
-	function websiteRouteAvailable( routeName ) {
-		return !!( nonce && post && endpoints && endpoints[ routeName ] && websiteActions.indexOf( routeName ) !== -1 );
-	}
-
-	/**
-	 * Attach a click listener to one website marker. Called for server-rendered
-	 * markers at init and for client-built markers as they are created.
-	 *
-	 * @param {Element} marker
-	 */
-	function bindWebsiteMarker( marker ) {
-		marker.addEventListener( 'click', function () {
-			fireWebsiteMarker( marker );
-		} );
-	}
-
-	/**
-	 * Build the guided website card client-side (document.createElement +
-	 * textContent only — never innerHTML) for the no-refresh case where the
-	 * server had nothing to render because the page loaded before the run
-	 * parked. Mirrors the server-pinned copy in templates/admin/publish.php
-	 * exactly.
-	 *
-	 * @return {Element}
-	 */
-	function buildWebsiteCard() {
-		var section = document.createElement( 'section' );
-		section.className = 'card cast-website-card';
-
-		var heading = document.createElement( 'h2' );
-		heading.textContent = 'Publish to Pinner needs a website.';
-		section.appendChild( heading );
-
-		var subline = document.createElement( 'p' );
-		subline.className = 'cast-website-subline';
-		subline.textContent = 'A website tells Pinner where to serve your upload. Create one, or link one you already own.';
-		section.appendChild( subline );
-
-		var cid = document.createElement( 'p' );
-		cid.className = 'cast-website-cid';
-		section.appendChild( cid );
-
-		// Path (a): create a new website. Hostname optional; when empty the
-		// platform domain would be auto-generated, so the card requires the
-		// explicit confirmation below before any create POST (no silent
-		// auto-create anywhere in the no-refresh path).
-		var create = document.createElement( 'div' );
-		create.className = 'cast-website-path cast-website-path-create';
-
-		var createHeading = document.createElement( 'h3' );
-		createHeading.textContent = 'Create a new website';
-		create.appendChild( createHeading );
-
-		var createLabel = document.createElement( 'label' );
-		createLabel.className = 'cast-website-hostname-label';
-		createLabel.textContent = 'Web address (optional)';
-		create.appendChild( createLabel );
-
-		var hostname = document.createElement( 'input' );
-		hostname.className = 'cast-website-hostname';
-		hostname.setAttribute( 'type', 'text' );
-		hostname.setAttribute( 'autocomplete', 'off' );
-		hostname.setAttribute( 'placeholder', 'e.g. mysite.com' );
-		create.appendChild( hostname );
-
-		var createButton = document.createElement( 'button' );
-		createButton.className = 'button button-primary cast-website-create';
-		createButton.setAttribute( 'data-website-action', 'create' );
-		createButton.textContent = 'Create website';
-		create.appendChild( createButton );
-		bindWebsiteMarker( createButton );
-
-		var confirmText = document.createElement( 'p' );
-		confirmText.className = 'cast-website-create-confirm';
-		confirmText.hidden = true;
-		confirmText.textContent = 'Platform domain will be auto-generated — continue?';
-		create.appendChild( confirmText );
-
-		var confirmButton = document.createElement( 'button' );
-		confirmButton.className = 'button cast-website-create-confirm-btn';
-		confirmButton.setAttribute( 'data-website-action', 'create-confirm' );
-		confirmButton.hidden = true;
-		confirmButton.textContent = 'Yes, auto-generate';
-		create.appendChild( confirmButton );
-		bindWebsiteMarker( confirmButton );
-
-		section.appendChild( create );
-
-		// Path (b): link an existing website the account owns. The list
-		// payload carries no "linked to another workspace" marker, so every
-		// row is offered; an attach conflict surfaces as a typed refusal once
-		// the link action runs.
-		var link = document.createElement( 'div' );
-		link.className = 'cast-website-path cast-website-path-link';
-
-		var linkHeading = document.createElement( 'h3' );
-		linkHeading.textContent = 'Link a website you already have';
-		link.appendChild( linkHeading );
-
-		var picker = document.createElement( 'ul' );
-		picker.className = 'cast-website-picker';
-		link.appendChild( picker );
-
-		var empty = document.createElement( 'p' );
-		empty.className = 'cast-website-link-empty';
-		empty.hidden = true;
-		empty.textContent = 'No websites available to link. Create one, or handle it in Pinner.';
-		link.appendChild( empty );
-
-		section.appendChild( link );
-
-		var error = document.createElement( 'p' );
-		error.className = 'cast-website-error notice notice-error';
-		error.hidden = true;
-		section.appendChild( error );
-
-		var result = document.createElement( 'p' );
-		result.className = 'cast-website-result';
-		section.appendChild( result );
-
-		return section;
-	}
-
-	/**
-	 * Render the guided website card from one status report: reveal it while
-	 * the run awaits a website, build it client-side when a park was caught
-	 * mid-poll, quote the preserved CID, refresh the link picker and reset the
-	 * create confirmation. Every write goes through textContent / hidden —
-	 * never innerHTML.
-	 *
-	 * @param {object} status
-	 */
-	function renderWebsiteCard( status ) {
-		status = status || {};
-
-		var root = el( '.cast-website-root' );
-		var card = el( '.cast-website-card' );
-
-		if ( ! status.awaiting_website ) {
-			if ( root && card ) {
-				card.hidden = true;
-			}
-			if ( root && document.createElement ) {
-				root.replaceChildren();
-			}
-			return;
-		}
-
-		// A park caught after this page loaded had no server-rendered card;
-		// build the mirror into the root placeholder once.
-		if ( ! card && root && document.createElement ) {
-			card = buildWebsiteCard();
-			root.appendChild( card );
-			card = el( '.cast-website-card' );
-		}
-
-		if ( ! card ) {
-			return;
-		}
-
-		card.hidden = false;
-
-		// The preserved CID the operator matches in Pinner: the top-level
-		// publish_cid is null for a resumable park, so this is the only quote.
-		setText( '.cast-website-cid', status.awaiting_cid ? 'Preserved CID: ' + status.awaiting_cid : '' );
-
-		resetCreateConfirm();
-		refreshWebsitePicker();
-		showWebsiteError( '' );
-		setText( '.cast-website-result', '' );
-	}
-
-	/**
-	 * Collapse the guided card back to its initial, pre-confirmation state —
-	 * the empty-hostname confirm line/button only appear the moment they are
-	 * needed, and a later status report must never leave a stale confirm
-	 * visible.
-	 */
-	function resetCreateConfirm() {
-		var confirmText = el( '.cast-website-create-confirm' );
-		var confirmButton = el( '.cast-website-create-confirm-btn' );
-
-		if ( confirmText ) {
-			confirmText.hidden = true;
-		}
-		if ( confirmButton ) {
-			confirmButton.hidden = true;
-		}
-	}
-
-	/**
-	 * Fetch the account's websites for the link picker and render them. A
-	 * failed read surfaces through the card error line and the picker empty
-	 * state — never a silent partial list.
-	 */
-	function refreshWebsitePicker() {
-		if ( ! websiteRouteAvailable( 'website_available' ) ) {
-			return;
-		}
-
-		post( endpoints.website_available, {
-			method: 'GET',
-			headers: { 'X-WP-Nonce': nonce },
-			credentials: 'same-origin'
-		} ).then( function ( response ) {
-			if ( ! response || ! response.ok ) {
-				renderWebsitePicker( null );
-				return null;
-			}
-
-			return response.json();
-		} ).then( function ( data ) {
-			if ( ! data ) {
-				return null;
-			}
-
-			renderWebsitePicker( data );
-			return null;
-		} ).catch( function () {
-			renderWebsitePicker( null );
-		} );
-	}
-
-	/**
-	 * Render one available-website picker payload (or null on a failed read)
-	 * into the card: refused reads and empty lists share the empty state, a
-	 * refusal is also surfaced on the card error line. Rows are rebuilt with
-	 * createElement + textContent so no value can become markup.
-	 *
-	 * @param {?object} data
-	 */
-	function renderWebsitePicker( data ) {
-		data = data || {};
-		var rows = data.websites || [];
-		var refused = ! data.listed;
-		var picker = el( '.cast-website-picker' );
-		var empty = el( '.cast-website-link-empty' );
-
-		if ( ! picker ) {
-			return;
-		}
-
-		// Rebuild the picker from scratch on every read; rows carry only
-		// textContent, so no value can become markup.
-		picker.replaceChildren ? picker.replaceChildren() : ( picker.children = [] );
-
-		if ( refused ) {
-			showWebsiteError( websiteRefusalCopy( data.refusal || 'list_failed' ) );
-		}
-
-		if ( refused || rows.length === 0 ) {
-			if ( empty ) {
-				empty.hidden = false;
-			}
-			return;
-		}
-
-		if ( empty ) {
-			empty.hidden = true;
-		}
-
-		for ( var i = 0; i < rows.length; i++ ) {
-			picker.appendChild( buildWebsitePickerRow( rows[ i ] ) );
-		}
-	}
-
-	/**
-	 * One picker row — a button carrying the website id so a click links that
-	 * website. The domain names the row; the status is shown when present.
-	 *
-	 * @param {object} row
-	 * @return {Element}
-	 */
-	function buildWebsitePickerRow( row ) {
-		row = row || {};
-
-		var item = document.createElement( 'li' );
-		var button = document.createElement( 'button' );
-		var name = document.createElement( 'span' );
-
-		name.className = 'cast-website-picker-name';
-		name.textContent = row.domain || ( 'Website ' + ( row.website_id || '' ) );
-		button.className = 'cast-website-picker-row';
-		button.setAttribute( 'data-website-action', 'link' );
-		button.setAttribute( 'data-website-id', String( row.website_id || '' ) );
-		button.appendChild( name );
-
-		if ( row.status ) {
-			var status = document.createElement( 'span' );
-			status.className = 'cast-website-picker-status';
-			status.textContent = String( row.status );
-			button.appendChild( status );
-		}
-
-		item.appendChild( button );
-		bindWebsiteMarker( button );
-
-		return item;
-	}
-
-	/**
-	 * Dispatch one website marker. Only the allowlisted marker actions are
-	 * handled; an unknown marker is inert.
-	 *
-	 * @param {Element} marker
-	 */
-	function fireWebsiteMarker( marker ) {
-		var action = marker.getAttribute( 'data-website-action' );
-
-		switch ( action ) {
-			case 'create':
-				handleCreateRequest();
-				break;
-			case 'create-confirm':
-				confirmCreateRequest();
-				break;
-			case 'link':
-				websiteLinkAction( marker.getAttribute( 'data-website-id' ) || '' );
-				break;
-		}
-	}
-
-	/**
-	 * The create path's explicit-confirmation gate. A named hostname is an
-	 * explicit create and POSTs immediately; an EMPTY hostname means the
-	 * platform domain would be auto-generated, so the card first reveals the
-	 * confirmation line + "Yes, auto-generate" button — nothing is POSTed
-	 * until the operator confirms (no silent auto-create).
-	 */
-	function handleCreateRequest() {
-		var hostnameNode = el( '.cast-website-hostname' );
-		var hostname = hostnameNode
-			? String( hostnameNode.value || hostnameNode.getAttribute( 'value' ) || '' )
-			: '';
-
-		var confirmText = el( '.cast-website-create-confirm' );
-		var confirmButton = el( '.cast-website-create-confirm-btn' );
-
-		if ( hostname === '' ) {
-			if ( confirmText ) {
-				confirmText.hidden = false;
-			}
-			if ( confirmButton ) {
-				confirmButton.hidden = false;
-			}
-			return;
-		}
-
-		if ( confirmText ) {
-			confirmText.hidden = true;
-		}
-		if ( confirmButton ) {
-			confirmButton.hidden = true;
-		}
-
-		websiteCreateAction( hostname );
-	}
-
-	/**
-	 * The explicit empty-hostname confirmation: the operator accepted the
-	 * auto-generated platform domain, so the create POST may fire.
-	 */
-	function confirmCreateRequest() {
-		resetCreateConfirm();
-		websiteCreateAction( '' );
-	}
-
-	/**
-	 * Re-fetch everything after a website-card mutation (a create or link
-	 * action, success OR refusal). The status report re-renders the card —
-	 * hiding it the moment the run un-parks — and the available list re-fills
-	 * the link picker, so a mutation never leaves a stale awaiting card, a
-	 * stale picker, or a wedged spinner: the card always reflects the server's
-	 * current reality instead of waiting for the next poll tick.
-	 *
-	 * An optional refusal copy is written only AFTER the refresh settles, so a
-	 * still-awaiting card's render (which clears the error and result lines)
-	 * cannot wipe the message a refusal just surfaced — the spinner is cleared
-	 * first, then the copy lands on the error line.
-	 *
-	 * @param {?string} refusalCopy
-	 */
-	function refreshWebsiteState( refusalCopy ) {
-		refreshWebsitePicker();
-		fetchStatus().then( function () {
-			if ( refusalCopy ) {
-				showWebsiteError( refusalCopy );
-			}
-		} );
-	}
-
-	/**
-	 * POST the explicit create to the localized route. On success the run
-	 * un-parks on the next status fetch (the identity binding was recorded
-	 * server-side); a refusal is surfaced on the card error line. Either way
-	 * the card re-fetches status AND the available list and re-renders, so the
-	 * awaiting card disappears as soon as the server reports the link and the
-	 * picker always shows the freshly created website.
-	 *
-	 * @param {string} hostname
-	 */
-	function websiteCreateAction( hostname ) {
-		if ( ! websiteRouteAvailable( 'website_create' ) ) {
-			announce( 'This action is not available right now.' );
-			return;
-		}
-
-		setText( '.cast-website-result', 'Creating your website…' );
-
-		post( endpoints.website_create, {
-			method: 'POST',
-			headers: {
-				'X-WP-Nonce': nonce,
-				'Content-Type': 'application/json'
-			},
-			credentials: 'same-origin',
-			body: JSON.stringify( { hostname: hostname || '' } )
-		} ).then( function ( response ) {
-			if ( ! response || ! response.ok ) {
-				setText( '.cast-website-result', '' );
-				refreshWebsiteState( websiteRefusalCopy( 'create_failed' ) );
-				return null;
-			}
-
-			return response.json();
-		} ).then( function ( data ) {
-			if ( ! data ) {
-				return null;
-			}
-
-			if ( data.created ) {
-				setText( '.cast-website-result', 'Website created — resuming your publish.' );
-				announce( 'Website created — resuming your publish.' );
-				refreshWebsiteState();
-				return null;
-			}
-
-			setText( '.cast-website-result', '' );
-			refreshWebsiteState( websiteRefusalCopy( data.refusal || 'create_failed' ) );
-			return null;
-		} ).catch( function () {
-			setText( '.cast-website-result', '' );
-			refreshWebsiteState( websiteRefusalCopy( 'create_failed' ) );
-		} );
-	}
-
-	/**
-	 * POST the link action to the localized route. On success the run un-parks
-	 * on the next status fetch; a refusal — including an "already linked to
-	 * another workspace" conflict, which the list payload cannot express — is
-	 * surfaced on the card error line. Either way the card re-fetches status
-	 * AND the available list and re-renders, so the "Linking…" spinner always
-	 * clears and a 409-refusal shows the copy while the refreshed status shows
-	 * the real (already linked) state instead of a dead awaiting card.
-	 *
-	 * @param {string} websiteId
-	 */
-	function websiteLinkAction( websiteId ) {
-		if ( ! websiteRouteAvailable( 'website_link' ) ) {
-			announce( 'This action is not available right now.' );
-			return;
-		}
-
-		setText( '.cast-website-result', 'Linking your website…' );
-
-		post( endpoints.website_link, {
-			method: 'POST',
-			headers: {
-				'X-WP-Nonce': nonce,
-				'Content-Type': 'application/json'
-			},
-			credentials: 'same-origin',
-			body: JSON.stringify( { website_id: websiteId } )
-		} ).then( function ( response ) {
-			if ( ! response || ! response.ok ) {
-				setText( '.cast-website-result', '' );
-				refreshWebsiteState( websiteRefusalCopy( 'link_failed' ) );
-				return null;
-			}
-
-			return response.json();
-		} ).then( function ( data ) {
-			if ( ! data ) {
-				return null;
-			}
-
-			if ( data.linked ) {
-				setText( '.cast-website-result', 'Website linked — resuming your publish.' );
-				announce( 'Website linked — resuming your publish.' );
-				refreshWebsiteState();
-				return null;
-			}
-
-			setText( '.cast-website-result', '' );
-			refreshWebsiteState( websiteRefusalCopy( data.refusal || 'link_failed' ) );
-			return null;
-		} ).catch( function () {
-			setText( '.cast-website-result', '' );
-			refreshWebsiteState( websiteRefusalCopy( 'link_failed' ) );
-		} );
-	}
-
-	/**
-	 * The fixed end-user line for a website-card refusal. Only the typed
-	 * refusal code is mapped; the server never surfaces the wrapped exception
-	 * message, so no internal detail can leak through this copy.
-	 *
-	 * @param {?string} refusal
-	 * @return {string}
-	 */
-	function websiteRefusalCopy( refusal ) {
-		switch ( refusal ) {
-			case 'website_already_linked':
-				return 'This website is already used by another workspace. Pick another, or handle it in Pinner.';
-			case 'workspace_already_linked':
-				return 'Your workspace already has a website linked. Handle it in Pinner, then try again.';
-			case 'link_failed':
-				return 'That website could not be linked — it may already belong to another workspace. Pick another, or handle it in Pinner.';
-			case 'create_failed':
-				return 'The website could not be created. Try again, or handle it in Pinner.';
-			case 'no_workspace':
-				return 'The workspace could not be resolved. Check the connection, then try again.';
-			case 'invalid_website_id':
-				return 'That website could not be selected. Refresh and try again.';
-			case 'unavailable':
-				return 'Website setup is unavailable until the connection is complete.';
-			case 'not_awaiting_website':
-				return 'The run is no longer waiting for a website.';
-			case 'list_failed':
-				return 'The website list could not be loaded. Try again, or handle it in Pinner.';
-			default:
-				return 'That could not be completed right now. Try again, or handle it in Pinner.';
-		}
-	}
-
-	/**
-	 * Reveal the card's error line with the given copy (or hide it when the
-	 * copy is empty).
-	 *
-	 * @param {string} message
-	 */
-	function showWebsiteError( message ) {
-		var errorNode = el( '.cast-website-error' );
-
-		setText( '.cast-website-error', message || '' );
-
-		if ( errorNode ) {
-			errorNode.hidden = ! message;
-		}
-	}
-
-	/**
-	 * Bind the server-rendered website card markers ([data-website-action]) at
-	 * init; client-built cards bind their own markers as they are created.
-	 */
-	function bindWebsiteMarkers() {
-		var markers = document.querySelectorAll( '[data-website-action]' );
-		var i;
-
-		for ( i = 0; i < markers.length; i++ ) {
-			bindWebsiteMarker( markers[ i ] );
-		}
-	}
-
-	/* --------------------------- domain surface (W3) ----------------------- */
-
-	// The W3 "choose a domain" orchestrator: list/bind/verify/delete/DNS/SSL
-	// plus the pre-bind platform catalog and availability reads. The panel is
-	// only live when the server localized the domain endpoints + allowlist (a
-	// complete portal identity); without them every domain call is inert, so a
-	// partial or forged payload can never reach a domain route.
+	/* ---------------------- connect-your-domain card ---------------------- */
+
+	// The "Connect your domain" card orchestrator (custom destinations only):
+	// domainDns()/domainSsl() re-read the delegation/SSL routes for the
+	// SELECTED domain and domainValidate() re-checks its records. The card is
+	// only live when the server localized the domain endpoints + allowlist;
+	// without them every domain call is inert, so a partial or forged payload
+	// can never reach a domain route.
 	var domainActions = config.domain_actions || [];
-	var verifyPoll = config.verify_poll || {};
-	var verifyIntervalMs = verifyPoll.intervalMs || 0;
-	var verifyMaxAttempts = verifyPoll.maxAttempts || 0;
 
 	/**
 	 * Whether a domain client route may be used: the localized nonce, the
@@ -2132,14 +1562,8 @@
 	 */
 	function domainActionForMarker( action ) {
 		switch ( action ) {
-			case 'bind':
-				return 'domain_bind';
-			case 'verify':
-				return 'domain_verify';
 			case 'validate':
 				return 'domain_validate';
-			case 'delete':
-				return 'domain_delete';
 			case 'dns':
 				return 'domain_dns';
 			case 'ssl':
@@ -2150,353 +1574,8 @@
 	}
 
 	/**
-	 * Fetch the bound-domain list and return the parsed payload (or null when
-	 * the read fails / the surface is unavailable). Shared by the bounded
-	 * verify poll (which inspects the active state), so the poll and the
-	 * public domainList() always agree on one serialization.
-	 *
-	 * @return {Promise<?object>}
-	 */
-	function fetchDomainListPayload() {
-		if ( ! domainRouteAvailable( 'domain_list' ) ) {
-			return Promise.resolve( null );
-		}
-
-		return post( endpoints.domain_list, {
-			method: 'GET',
-			headers: { 'X-WP-Nonce': nonce },
-			credentials: 'same-origin'
-		} ).then( function ( response ) {
-			if ( ! response || ! response.ok ) {
-				return null;
-			}
-
-			return response.json();
-		} ).catch( function () {
-			return null;
-		} );
-	}
-
-	/**
-	 * One bound-domain row, rendered with document.createElement so no value
-	 * can become markup — the first span carries the domain name.
-	 *
-	 * @param {object} row
-	 * @return {Element}
-	 */
-	function renderDomainRow( row ) {
-		row = row || {};
-
-		var item = document.createElement( 'li' );
-		var name = document.createElement( 'span' );
-
-		name.className = 'cast-domain-name';
-		name.textContent = row.domain || '';
-		item.className = 'cast-domain-row';
-		item.appendChild( name );
-
-		if ( row.namespace ) {
-			var ns = document.createElement( 'span' );
-			ns.className = 'cast-domain-namespace';
-			ns.textContent = row.namespace;
-			item.appendChild( ns );
-		}
-
-		if ( row.status ) {
-			var status = document.createElement( 'span' );
-			status.className = 'cast-domain-status';
-			status.textContent = row.status;
-			item.appendChild( status );
-		}
-
-		if ( row.dns_hosting_enabled ) {
-			var hosted = document.createElement( 'span' );
-			hosted.className = 'cast-domain-hosted';
-			hosted.textContent = 'DNS hosted';
-			item.appendChild( hosted );
-		}
-
-		if ( row.gateway_host ) {
-			var gateway = document.createElement( 'span' );
-			gateway.className = 'cast-domain-gateway';
-			gateway.textContent = row.gateway_host;
-			item.appendChild( gateway );
-		}
-
-		return item;
-	}
-
-	/**
-	 * Render a bound-domain list payload into the W3 panel: the state label,
-	 * then one of the refused / empty / rows states. Every write goes through
-	 * textContent or hidden toggling; rows are rebuilt through createElement.
-	 *
-	 * @param {object} data
-	 */
-	function renderDomainList( data ) {
-		data = data || {};
-
-		var rows = data.domains || [];
-		var refusal = data.listed ? null : ( data.refusal || null );
-		var listNode = el( '.cast-domain-list' );
-		var rendered = [];
-		var i;
-
-		if ( refusal ) {
-			setText( '.cast-domain-state', 'Domain data unavailable' );
-			setTextAndToggle( '.cast-domain-list-refusal', refusal, true );
-			setTextAndToggle( '.cast-domain-list-empty', '', false );
-			setTextAndToggle( '.cast-domain-list', '', false );
-
-			if ( listNode ) {
-				listNode.replaceChildren();
-			}
-
-			return;
-		}
-
-		if ( rows.length === 0 ) {
-			// The state line names the panel's overall state, the empty line names
-			// the list itself — writing the same string to both would render a
-			// visible duplicate line, so they stay distinct (mirroring the
-			// server-rendered DomainDashboardView pair).
-			setText( '.cast-domain-state', 'Choose and manage your domain' );
-			setTextAndToggle( '.cast-domain-list-empty', 'No domains bound yet.', true );
-			setTextAndToggle( '.cast-domain-list-refusal', '', false );
-			setTextAndToggle( '.cast-domain-list', '', false );
-
-			if ( listNode ) {
-				listNode.replaceChildren();
-			}
-
-			return;
-		}
-
-		setText( '.cast-domain-state', 'Choose and manage your domain' );
-		setTextAndToggle( '.cast-domain-list', '', true );
-		setTextAndToggle( '.cast-domain-list-empty', '', false );
-		setTextAndToggle( '.cast-domain-list-refusal', '', false );
-
-		for ( i = 0; i < rows.length; i++ ) {
-			rendered.push( renderDomainRow( rows[ i ] ) );
-		}
-
-		if ( listNode ) {
-			listNode.replaceChildren.apply( listNode, rendered );
-		}
-	}
-
-	/**
-	 * Fetch the bound-domain list once and render the W3 panel. Resolves true
-	 * when the server answered (including a typed refusal — itself a rendered
-	 * state), false when the surface is unavailable or the fetch failed.
-	 *
-	 * @return {Promise<boolean>}
-	 */
-	function domainList() {
-		return new Promise( function ( resolve ) {
-			if ( ! domainRouteAvailable( 'domain_list' ) ) {
-				resolve( false );
-				return;
-			}
-
-			post( endpoints.domain_list, {
-				method: 'GET',
-				headers: { 'X-WP-Nonce': nonce },
-				credentials: 'same-origin'
-			} ).then( function ( response ) {
-				if ( ! response || ! response.ok ) {
-					announce( 'The domain list could not be refreshed.' );
-					resolve( false );
-					return null;
-				}
-
-				return response.json();
-			} ).then( function ( data ) {
-				if ( ! data ) {
-					resolve( false );
-					return;
-				}
-
-				renderDomainList( data );
-				resolve( true );
-			} ).catch( function () {
-				announce( 'The domain list could not be refreshed.' );
-				resolve( false );
-			} );
-		} );
-	}
-
-	/**
-	 * Bind an ICANN/HNS domain to the registered website. POSTs the domain +
-	 * namespace to the bind route with the nonce header, announces the result
-	 * and re-fetches the list so the panel resyncs. An empty domain is refused
-	 * client-side and never reaches the route.
-	 *
-	 * @param {string} domain
-	 * @param {string} namespace
-	 * @return {Promise<boolean>}
-	 */
-	function domainBind( domain, namespace ) {
-		return new Promise( function ( resolve ) {
-			domain = String( domain || '' ).trim();
-
-			if ( ! domain || ! domainRouteAvailable( 'domain_bind' ) ) {
-				resolve( false );
-				return;
-			}
-
-			post( endpoints.domain_bind, {
-				method: 'POST',
-				headers: {
-					'X-WP-Nonce': nonce,
-					'Content-Type': 'application/json'
-				},
-				credentials: 'same-origin',
-				body: JSON.stringify( { domain: domain, namespace: String( namespace || '' ) } )
-			} ).then( function ( response ) {
-				if ( ! response || ! response.ok ) {
-					announce( 'The domain could not be bound.' );
-					resolve( false );
-					return;
-				}
-
-				announce( 'Domain bound.' );
-				resolve( true );
-				domainList();
-			} ).catch( function () {
-				announce( 'The domain could not be bound.' );
-				resolve( false );
-			} );
-		} );
-	}
-
-	/**
-	 * (Re)verify a domain binding: POST the verify route once, then poll the
-	 * domain list with a BOUNDED budget (verify_poll interval/maxAttempts)
-	 * until the binding flips to 'active'. Confirmation never comes from a
-	 * second verify POST — only from the list reflecting the verified state.
-	 *
-	 * @param {string} domainId
-	 * @return {Promise<boolean>}
-	 */
-	function domainVerify( domainId ) {
-		return new Promise( function ( resolve ) {
-			if ( ! domainRouteAvailable( 'domain_verify' ) ) {
-				resolve( false );
-				return;
-			}
-
-			post( endpoints.domain_verify, {
-				method: 'POST',
-				headers: {
-					'X-WP-Nonce': nonce,
-					'Content-Type': 'application/json'
-				},
-				credentials: 'same-origin',
-				body: JSON.stringify( { domain_id: String( domainId || '' ) } )
-			} ).then( function ( response ) {
-				if ( ! response || ! response.ok ) {
-					announce( 'The domain could not be verified.' );
-					resolve( false );
-					return;
-				}
-
-				pollDomainVerified( String( domainId || '' ), 0, resolve );
-			} ).catch( function () {
-				announce( 'The domain could not be verified.' );
-				resolve( false );
-			} );
-		} );
-	}
-
-	/**
-	 * One verification-list poll step. Attempt 0 runs immediately after the
-	 * verify POST; each later attempt is spaced by the verify interval. An
-	 * 'active' binding resolves true; exhausting the budget resolves false.
-	 *
-	 * @param {string} domainId
-	 * @param {number} attempt
-	 * @param {Function} resolve
-	 */
-	function pollDomainVerified( domainId, attempt, resolve ) {
-		fetchDomainListPayload().then( function ( data ) {
-			var active = false;
-			var i;
-
-			if ( data && data.listed && data.domains ) {
-				for ( i = 0; i < data.domains.length; i++ ) {
-					if ( String( data.domains[ i ].id ) === domainId && data.domains[ i ].status === 'active' ) {
-						active = true;
-						break;
-					}
-				}
-			}
-
-			if ( data ) {
-				renderDomainList( data );
-			}
-
-			if ( active ) {
-				announce( 'Domain verified.' );
-				resolve( true );
-				return;
-			}
-
-			if ( attempt + 1 < verifyMaxAttempts ) {
-				window.setTimeout( function () {
-					pollDomainVerified( domainId, attempt + 1, resolve );
-				}, verifyIntervalMs );
-				return;
-			}
-
-			announce( 'The domain is still pending verification.' );
-			resolve( false );
-		} );
-	}
-
-	/**
-	 * Delete (unbind) a domain from the registered website. POSTs the domain
-	 * id to the delete route, announces the result and re-fetches the list so
-	 * the panel resyncs.
-	 *
-	 * @param {string} domainId
-	 * @return {Promise<boolean>}
-	 */
-	function domainDelete( domainId ) {
-		return new Promise( function ( resolve ) {
-			if ( ! domainRouteAvailable( 'domain_delete' ) ) {
-				resolve( false );
-				return;
-			}
-
-			post( endpoints.domain_delete, {
-				method: 'POST',
-				headers: {
-					'X-WP-Nonce': nonce,
-					'Content-Type': 'application/json'
-				},
-				credentials: 'same-origin',
-				body: JSON.stringify( { domain_id: String( domainId || '' ) } )
-			} ).then( function ( response ) {
-				if ( ! response || ! response.ok ) {
-					announce( 'The domain could not be deleted.' );
-					resolve( false );
-					return;
-				}
-
-				announce( 'Domain deleted.' );
-				resolve( true );
-				domainList();
-			} ).catch( function () {
-				announce( 'The domain could not be deleted.' );
-				resolve( false );
-			} );
-		} );
-	}
-
-	/**
-	 * The DNS label copy mirroring DomainDashboardView::dnsLabelFor.
+	 * The human-safe DNS state label the card's DNS line shows for one bound
+	 * domain, mirroring the server's DomainDashboardView::dnsLabelFor mapping.
 	 *
 	 * @param {object} domain
 	 * @return {string}
@@ -2723,6 +1802,10 @@
 		var namespace = String( domain.namespace || '' );
 		var icann = namespace === 'icann';
 		var hns = namespace === 'hns';
+		// On-chain managed (an HNS binding whose DNS is served by an external
+		// on-chain contract): a distinct state checked BEFORE the managed /
+		// self-managed delegation branches, so it never inherits their copy.
+		var onchain = String( domain.status || '' ) === 'onchain_managed';
 		var cells = [
 			[ 'Domain', domain.domain ],
 			[ 'Namespace', domain.namespace ],
@@ -2749,6 +1832,37 @@
 		}
 
 		nodes.push( summary );
+
+		if ( onchain ) {
+			// On-chain managed: the domain is held on-chain and its DNS records
+			// are set on-chain, not in a Pinner-managed zone. Show only the
+			// server-returned DNSLink/TLSA guidance (the delegation bundle's
+			// records, when present, plus the per-record checks) and never claim
+			// Pinner manages the DNS — that framing belongs to the delegated
+			// managed / self-managed cases only.
+			nodes.push( renderDnsInstruction( 'This domain is managed on-chain, so its DNS records are set on-chain, not by Pinner.' ) );
+			nodes.push( renderDnsInstruction( 'Publish the DNSLink and TLSA records shown below on-chain, wherever you manage this domain\'s DNS.' ) );
+			if ( delegation ) {
+				var onchainParent = delegation.parent_records || [];
+				var onchainAuthoritative = delegation.authoritative_records || [];
+
+				if ( onchainParent.length || onchainAuthoritative.length ) {
+					nodes.push( renderDnsHeading( 'Records to publish on-chain' ) );
+					if ( onchainParent.length ) {
+						nodes.push( renderRecordsTable( onchainParent ) );
+					}
+					if ( onchainAuthoritative.length ) {
+						nodes.push( renderRecordsTable( onchainAuthoritative ) );
+					}
+				}
+			}
+
+			if ( checks.length ) {
+				nodes = nodes.concat( renderChecks( checks ) );
+			}
+
+			return nodes;
+		}
 
 		if ( ! delegation ) {
 			// No delegation bundle yet: say so rather than implying records
@@ -2948,7 +2062,7 @@
 
 		for ( i = 0; i < markers.length; i++ ) {
 			if ( markers[ i ].getAttribute( 'data-domain-action' ) === 'validate' ) {
-				markers[ i ].textContent = working ? 'Validating...' : 'Validate DNS';
+				markers[ i ].textContent = working ? 'Validating...' : 'I made the changes — check again';
 				markers[ i ].disabled = !! working;
 				markers[ i ].setAttribute( 'aria-busy', working ? 'true' : 'false' );
 				break;
@@ -3140,61 +2254,922 @@
 		} );
 	}
 
+	/* --------------------------- address wizard (S5) ------------------------- */
+
+	// The "Your site address" wizard: a focused guide, not a second dashboard.
+	// The wizard is server-rendered (hidden in the initial paint) so the no-JS
+	// prompt and the JS flow share one markup. Exactly three native radio
+	// choices, each revealing only its branch's fields; the final review is a
+	// plain read-out (the user never re-types the domain); one confirm button
+	// saves the destination (POST /publish/destination), confirms it
+	// (POST /publish/destination/confirm) and — for a first publish — starts
+	// the run. Every destination call is gated by the localized
+	// destination-endpoint allowlist + nonce.
+	var destinationActions = config.destination_actions || [];
+	var addressBusy = false;
+	var availableWebsites = [];
+
 	/**
-	 * Read the pre-bind platform-domain catalog (the suffixes a domain may be
-	 * bound under). Resolves true when the read succeeded.
+	 * Whether a destination client route may be used: the localized nonce, the
+	 * fetch surface, the route endpoint and the destination-action allowlist
+	 * must all exist. Mirrors the server's refusal posture and keeps every
+	 * destination call inert for a forged or partial localized payload.
+	 *
+	 * @param {string} routeName
+	 * @return {boolean}
+	 */
+	function destinationRouteAvailable( routeName ) {
+		return !!( nonce && post && endpoints && endpoints[ routeName ] && destinationActions.indexOf( routeName ) !== -1 );
+	}
+
+	/**
+	 * Friendly copy for each destination refusal code, mirroring the server's
+	 * PublishDestinationRefusal — the wizard never shows a raw code.
+	 *
+	 * @param {?string} refusal
+	 * @return {string}
+	 */
+	function destinationRefusalCopy( refusal ) {
+		switch ( refusal ) {
+			case 'store_unavailable':
+				return 'Your publish address could not be saved right now. Please try again.';
+			case 'invalid_input':
+				return 'Please check the address details and try again.';
+			case 'confirmed_cannot_change':
+				return 'This address is already confirmed and can no longer be changed.';
+			case 'created_or_attached_cannot_change':
+				return 'This address is live and can no longer be changed.';
+			case 'website_already_attached':
+				return 'This Pinner site is already attached to another workspace.';
+			case 'attach_failed':
+				return 'Pinner could not attach that site. Please try again.';
+			default:
+				return 'The address could not be saved. Please try again.';
+		}
+	}
+
+	/**
+	 * Friendly copy for the first-publish start refusals (the server's
+	 * PublishStartRefusal) the address wizard can surface — the address IS
+	 * confirmed by the time these land, so the copy says what unblocks the
+	 * publish instead of a generic failure.
+	 *
+	 * @param {?string} refusal
+	 * @return {string}
+	 */
+	function startRefusalCopy( refusal ) {
+		switch ( refusal ) {
+			case 'no_eligible_content':
+				return 'There is no publishable content on your site yet. Add a page or post, then start a publish from this page.';
+			default:
+				return 'The publish could not be started right now. Please try again.';
+		}
+	}
+
+	/**
+	 * The confirm button's label, mirroring the template's
+	 * $addressConfirmLabel: the button promises a publish only while a first
+	 * publish can start right now (the same can('start') call the wizard's
+	 * start attempt is gated on) — otherwise it names only what the click
+	 * does: create and confirm the address.
+	 *
+	 * @param {?object} status
+	 * @return {string}
+	 */
+	function addressConfirmLabelFor( status ) {
+		return can( 'start', status ) ? 'Create address and publish' : 'Create address';
+	}
+
+	/**
+	 * The source label the address summary shows, mirroring the template's
+	 * $addressSourceLabel table so the no-refresh card never drifts from the
+	 * server paint.
+	 *
+	 * @param {?string} source
+	 * @return {string}
+	 */
+	function addressSourceLabelFor( source ) {
+		switch ( source ) {
+			case 'platform':
+				return 'Pinner address';
+			case 'custom':
+				return 'Your own domain';
+			case 'existing':
+				return 'Existing Pinner site';
+			default:
+				return '';
+		}
+	}
+
+	/**
+	 * The display address the summary shows, mirroring the template's
+	 * $addressValue composition (a generated platform address reads as a plain
+	 * promise until the first publish creates it).
+	 *
+	 * @param {object} destination
+	 * @return {string}
+	 */
+	function addressValueFor( destination ) {
+		destination = destination || {};
+
+		switch ( destination.source ) {
+			case 'platform': {
+				var platformDomain = destination.platform_domain || '';
+				var label = destination.label || '';
+				return label !== ''
+					? ( platformDomain !== '' ? label + '.' + platformDomain : label )
+					: 'A free Pinner address';
+			}
+			case 'custom':
+			case 'existing':
+				return destination.domain || '';
+			default:
+				return '';
+		}
+	}
+
+	/**
+	 * The persisted destination setup's lifecycle from the latest report
+	 * ('draft' | 'confirmed' | 'created_or_attached'), or '' when no
+	 * destination exists. The mutation wizard is legal only while the choice
+	 * is still a draft: a confirmed (frozen) or created/attached status —
+	 * including one that arrives via a routine poll — never opens or submits
+	 * the wizard.
+	 *
+	 * @param {?object} status
+	 * @return {string}
+	 */
+	function destinationLifecycleOf( status ) {
+		return status && status.destination && typeof status.destination.lifecycle === 'string'
+			? status.destination.lifecycle
+			: '';
+	}
+
+	/**
+	 * Re-derive the address summary from the latest report. The summary
+	 * (source label + address + the durable note) resyncs with the report, but
+	 * a normal status poll NEVER hides an open, unconfirmed wizard or touches
+	 * its field selections: the wizard only closes on an explicit confirm
+	 * (closeAddressWizard), so a routine 30-second poll can never discard an
+	 * in-progress choice. A report that says the choice is NO LONGER a draft
+	 * (confirmed elsewhere, or created/attached) is the exception: the
+	 * mutation surface freezes — the wizard closes and the review entry is
+	 * withheld.
+	 *
+	 * @param {?object} status
+	 */
+	function renderAddressCard( status ) {
+		var view = status && status.destination;
+		var destination = view ? view.destination : null;
+		var lifecycle = view && typeof view.lifecycle === 'string' ? view.lifecycle : '';
+
+		if ( ! destination ) {
+			var prompt = el( '.cast-address-prompt' );
+			if ( prompt ) {
+				prompt.hidden = false;
+			}
+			return;
+		}
+
+		// A frozen (confirmed) or final (created/attached) choice is a summary,
+		// not an editor: close any open wizard and withhold the review entry.
+		if ( lifecycle === 'confirmed' || lifecycle === 'created_or_attached' ) {
+			closeAddressWizard();
+		}
+		var review = el( '.cast-address-review' );
+		if ( review ) {
+			review.hidden = lifecycle !== 'draft';
+		}
+
+		var source = destination.source || '';
+
+		if ( el( '.cast-address-state' ) ) {
+			setText( '.cast-address-source', addressSourceLabelFor( source ) );
+			setText( '.cast-address-value', addressValueFor( destination ) );
+		} else {
+			// First destination created through the wizard: build the summary
+			// block (textContent only) so the card resyncs without a refresh.
+			buildAddressSummary( source, addressValueFor( destination ) );
+		}
+	}
+
+	/**
+	 * Build the server-style summary block when the initial paint had none
+	 * (no destination yet): a source-label line + the address line, inserted
+	 * ahead of the prompt, which is then hidden.
+	 *
+	 * @param {string} source
+	 * @param {string} value
+	 */
+	function buildAddressSummary( source, value ) {
+		var card = el( '.cast-address-card' );
+		if ( ! card ) {
+			return;
+		}
+
+		var state = document.createElement( 'p' );
+		state.className = 'cast-address-state';
+
+		var label = document.createElement( 'span' );
+		label.className = 'cast-address-source';
+		label.textContent = addressSourceLabelFor( source );
+		state.appendChild( label );
+
+		var valueNode = document.createElement( 'p' );
+		valueNode.className = 'cast-address-value';
+		valueNode.textContent = value;
+
+		var prompt = el( '.cast-address-prompt' );
+		if ( prompt && prompt.parentNode === card ) {
+			card.insertBefore( state, prompt );
+			card.insertBefore( valueNode, prompt );
+		} else {
+			card.appendChild( state );
+			card.appendChild( valueNode );
+		}
+
+		if ( prompt ) {
+			prompt.hidden = true;
+		}
+		var choose = el( '.cast-address-choose' );
+		if ( choose ) {
+			choose.hidden = true;
+		}
+	}
+
+	/**
+	 * Reveal the inline wizard (the "Choose address" / "Review address"
+	 * entry point), clear stale messages, reveal the checked source's branch
+	 * and move focus to the first choice.
+	 */
+	function openAddressWizard() {
+		var wizard = el( '.cast-address-wizard' );
+		if ( ! wizard ) {
+			return;
+		}
+
+		// The mutation wizard is draft-only: a confirmed (frozen) or
+		// created/attached choice — including one a poll reported after the
+		// entry point was painted — never opens the editor.
+		var lifecycle = destinationLifecycleOf( lastStatus );
+		if ( lifecycle !== '' && lifecycle !== 'draft' ) {
+			return;
+		}
+
+		wizard.hidden = false;
+		clearAddressWizardMessages();
+
+		var radios = document.querySelectorAll( 'input[name="cast-address-source"]' );
+		if ( radios.length ) {
+			var checked = null;
+			var i;
+			for ( i = 0; i < radios.length; i++ ) {
+				if ( radios[ i ].checked ) {
+					checked = radios[ i ];
+					break;
+				}
+			}
+			var source = checked ? checked.value : 'platform';
+			revealAddressBranch( source );
+			updateAddressNamespaceNote();
+			updateAddressReview();
+			// The existing branch lists the account's sites on demand — never at
+			// init, so an untouched page fetches only the status report.
+			if ( source === 'existing' ) {
+				refreshExistingPicker();
+			}
+			if ( typeof radios[ 0 ].focus === 'function' ) {
+				radios[ 0 ].focus();
+			}
+		}
+	}
+
+	/** Hide the inline wizard again (after a confirm, or a status paint). */
+	function closeAddressWizard() {
+		var wizard = el( '.cast-address-wizard' );
+		if ( wizard ) {
+			wizard.hidden = true;
+		}
+	}
+
+	/**
+	 * The checked radio of a native group, or null when none is checked.
+	 *
+	 * @param {string} name
+	 * @return {?Element}
+	 */
+	function checkedAddressRadio( name ) {
+		var radios = document.querySelectorAll( 'input[name="' + name + '"]' );
+		var i;
+
+		for ( i = 0; i < radios.length; i++ ) {
+			if ( radios[ i ].checked ) {
+				return radios[ i ];
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Reveal exactly the selected source's branch; every other branch hides.
+	 * The branches are keyed by the template's data-cast-address-branch
+	 * attribute — the same marker the server render uses — so a radio change
+	 * reveals precisely that source's fields and nothing else's.
+	 *
+	 * @param {string} source
+	 */
+	function revealAddressBranch( source ) {
+		var branches = {
+			platform: '[data-cast-address-branch="platform"]',
+			custom: '[data-cast-address-branch="custom"]',
+			existing: '[data-cast-address-branch="existing"]'
+		};
+		var name;
+
+		for ( name in branches ) {
+			if ( Object.prototype.hasOwnProperty.call( branches, name ) ) {
+				var branch = el( branches[ name ] );
+				if ( branch ) {
+					branch.hidden = name !== source;
+				}
+			}
+		}
+	}
+
+	/**
+	 * Reveal the namespace-specific DNS note for the chosen domain type and
+	 * hide the other one. The notes are server-rendered (one per namespace,
+	 * keyed by data-cast-namespace-note); the orchestrator only switches
+	 * which is visible, so the copy can never drift from the template.
+	 */
+	function updateAddressNamespaceNote() {
+		var namespaceEl = document.getElementById( 'cast-address-custom-namespace' );
+		var namespace = namespaceEl && namespaceEl.value ? String( namespaceEl.value ) : 'icann';
+		var notes = document.querySelectorAll( '[data-cast-namespace-note]' );
+		var i;
+
+		for ( i = 0; i < notes.length; i++ ) {
+			notes[ i ].hidden = notes[ i ].getAttribute( 'data-cast-namespace-note' ) !== namespace;
+		}
+	}
+
+	/** Clear both wizard message lines (error + result). */
+	function clearAddressWizardMessages() {
+		var error = el( '.cast-address-wizard-error' );
+		if ( error ) {
+			error.hidden = true;
+			error.textContent = '';
+		}
+		setText( '.cast-address-wizard-result', '' );
+	}
+
+	/** Show the wizard's error line (aria-live) and clear the result line. */
+	function showAddressWizardError( message ) {
+		var error = el( '.cast-address-wizard-error' );
+		if ( error ) {
+			error.textContent = message;
+			error.hidden = false;
+		}
+		setText( '.cast-address-wizard-result', '' );
+	}
+
+	/** Show the wizard's result line (aria-live) and clear the error line. */
+	function showAddressWizardResult( message ) {
+		var error = el( '.cast-address-wizard-error' );
+		if ( error ) {
+			error.hidden = true;
+			error.textContent = '';
+		}
+		setText( '.cast-address-wizard-result', message );
+	}
+
+	/**
+	 * Read the visible wizard fields into the destination save payload. Only
+	 * the selected source's fields are read — the server allowlists the fields
+	 * again, so a forged extra field can never alter the stored choice.
+	 *
+	 * @return {object}
+	 */
+	function buildAddressPayload() {
+		var radio = checkedAddressRadio( 'cast-address-source' );
+		var source = radio ? radio.value : 'platform';
+
+		if ( source === 'custom' ) {
+			var domainEl = document.getElementById( 'cast-address-custom-domain' );
+			var namespaceEl = document.getElementById( 'cast-address-custom-namespace' );
+			var dnsRadio = checkedAddressRadio( 'cast-address-dns' );
+			return {
+				source: 'custom',
+				domain: domainEl && domainEl.value ? String( domainEl.value ).trim() : '',
+				namespace: namespaceEl && namespaceEl.value ? String( namespaceEl.value ) : 'icann',
+				dns_hosting_enabled: ! dnsRadio || dnsRadio.value === 'managed'
+			};
+		}
+
+		if ( source === 'existing' ) {
+			var select = document.getElementById( 'cast-address-existing-website' );
+			return {
+				source: 'existing',
+				website_id: select && select.value ? String( select.value ) : ''
+			};
+		}
+
+		// The platform branch has no fields: the address is always generated
+		// (there is no ambiguous optional name to read).
+		return {
+			source: 'platform',
+			label: '',
+			generate: true
+		};
+	}
+
+	/**
+	 * Branch-specific validity: a custom domain requires the domain, an
+	 * existing attach requires a picked site, a platform address is always
+	 * valid (the hostname is optional — an empty one auto-generates).
+	 *
+	 * @param {object} payload
+	 * @return {boolean}
+	 */
+	function addressPayloadValid( payload ) {
+		switch ( payload.source ) {
+			case 'custom':
+				return payload.domain !== '';
+			case 'existing':
+				return payload.website_id !== '';
+			case 'platform':
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	/**
+	 * The human label for a picked account site (for the review read-out),
+	 * from the most recent available-sites list.
+	 *
+	 * @param {string} websiteId
+	 * @return {string}
+	 */
+	function existingLabelFor( websiteId ) {
+		var i;
+
+		for ( i = 0; i < availableWebsites.length; i++ ) {
+			if ( String( availableWebsites[ i ].website_id ) === String( websiteId ) ) {
+				return availableWebsites[ i ].domain || availableWebsites[ i ].website_name || websiteId;
+			}
+		}
+
+		return websiteId;
+	}
+
+	/**
+	 * The plain review read-out value for a payload — the user reviews the
+	 * address they already typed/picked, never re-types it.
+	 *
+	 * @param {object} payload
+	 * @return {string}
+	 */
+	function addressPreviewFor( payload ) {
+		switch ( payload.source ) {
+			case 'custom':
+				return payload.domain;
+			case 'existing':
+				return existingLabelFor( payload.website_id );
+			case 'platform':
+				return payload.label !== '' ? payload.label : 'A free Pinner address';
+			default:
+				return '';
+		}
+	}
+
+	/**
+	 * The full plain review sentence for a payload, per source. A generated
+	 * platform address is phrased as Pinner CREATING a free address — never
+	 * "available at A free Pinner address", which no such address is.
+	 *
+	 * @param {object} payload
+	 * @return {string}
+	 */
+	function addressReviewCopyFor( payload ) {
+		switch ( payload.source ) {
+			case 'platform':
+				return 'Pinner will create a free address for your site. You cannot change this address after your first publish.';
+			case 'custom':
+				return 'Your site will be available at ' + payload.domain + '. You cannot change this address after your first publish.';
+			case 'existing':
+				return 'Your site will be available at ' + existingLabelFor( payload.website_id ) + '. You cannot change this address after your first publish.';
+			default:
+				return '';
+		}
+	}
+
+	/**
+	 * Keep the plain review read-out and the confirm button in step with the
+	 * visible fields: the read-out shows the pending address (hidden until the
+	 * payload is valid) and the confirm button only arms for a valid payload.
+	 * The button's label also mirrors the latest report: it promises the
+	 * publish only while a first publish can start right now.
+	 */
+	function updateAddressReview() {
+		var payload = buildAddressPayload();
+		var valid = addressPayloadValid( payload );
+
+		var box = el( '.cast-address-review-box' );
+		if ( box ) {
+			box.hidden = ! valid;
+		}
+		setText( '.cast-address-review-copy', valid ? addressReviewCopyFor( payload ) : '' );
+
+		var confirm = el( '.cast-address-confirm' );
+		if ( confirm ) {
+			confirm.disabled = ! valid || addressBusy;
+			setText( '.cast-address-confirm', addressConfirmLabelFor( lastStatus ) );
+		}
+	}
+
+	/**
+	 * Show exactly one of the existing-site picker's states — loading, error
+	 * or empty ("ready" shows none) — so the picker never silently does
+	 * nothing: a fetch in flight says so, a failed fetch says so, and an empty
+	 * account says so.
+	 *
+	 * @param {string} state 'loading' | 'error' | 'empty' | 'ready'
+	 * @param {string} [message] The error copy (error state only).
+	 */
+	function setExistingPickerState( state, message ) {
+		var loading = el( '.cast-address-existing-loading' );
+		var error = el( '.cast-address-existing-error' );
+		var empty = el( '.cast-address-existing-empty' );
+
+		if ( loading ) {
+			loading.hidden = state !== 'loading';
+		}
+
+		if ( error ) {
+			error.hidden = state !== 'error';
+			if ( state === 'error' && message ) {
+				error.textContent = message;
+			}
+		}
+
+		if ( empty ) {
+			empty.hidden = state !== 'empty';
+		}
+	}
+
+	/**
+	 * Fetch the account's Pinner sites and populate the existing-site picker
+	 * (textContent-built options). The picker's loading / error / empty states
+	 * are always distinct: a failed or unlisted fetch surfaces the error state
+	 * (never a silent no-op), an empty account the empty note, and a success
+	 * the options themselves.
 	 *
 	 * @return {Promise<boolean>}
 	 */
-	function domainPlatform() {
-		return new Promise( function ( resolve ) {
-			if ( ! domainRouteAvailable( 'domain_platform' ) ) {
-				resolve( false );
-				return;
+	function refreshExistingPicker() {
+		if ( ! destinationRouteAvailable( 'website_available' ) ) {
+			return Promise.resolve( false );
+		}
+
+		setExistingPickerState( 'loading' );
+
+		return post( endpoints.website_available, {
+			method: 'GET',
+			headers: { 'X-WP-Nonce': nonce },
+			credentials: 'same-origin'
+		} ).then( function ( response ) {
+			if ( ! response || ! response.ok ) {
+				throw new Error( 'website list failed' );
 			}
 
-			post( endpoints.domain_platform, {
-				method: 'GET',
-				headers: { 'X-WP-Nonce': nonce },
-				credentials: 'same-origin'
-			} ).then( function ( response ) {
-				resolve( !!( response && response.ok ) );
-			} ).catch( function () {
-				resolve( false );
-			} );
+			return response.json();
+		} ).then( function ( data ) {
+			if ( ! data || ! data.listed ) {
+				throw new Error( 'website list unavailable' );
+			}
+
+			availableWebsites = data.websites || [];
+			var select = document.getElementById( 'cast-address-existing-website' );
+			if ( ! select ) {
+				return false;
+			}
+
+			var i;
+			var option;
+			for ( i = 0; i < availableWebsites.length; i++ ) {
+				option = document.createElement( 'option' );
+				option.value = String( availableWebsites[ i ].website_id || '' );
+				option.textContent =
+					availableWebsites[ i ].domain || availableWebsites[ i ].website_name || option.value;
+				select.appendChild( option );
+			}
+
+			setExistingPickerState( availableWebsites.length > 0 ? 'ready' : 'empty' );
+
+			return true;
+		} ).catch( function () {
+			setExistingPickerState( 'error', 'We could not load your Pinner sites. Please try again.' );
+			return false;
 		} );
 	}
 
 	/**
-	 * Check platform availability for a chosen label. Resolves true when the
-	 * read succeeded.
+	 * Hold the confirm button while a save/confirm request is in flight
+	 * (duplicate-click guard; the button re-arms when the flow settles).
 	 *
-	 * @param {string} label
-	 * @return {Promise<boolean>}
+	 * @param {boolean} working
 	 */
-	function domainAvailability( label ) {
-		return new Promise( function ( resolve ) {
-			if ( ! domainRouteAvailable( 'domain_availability' ) ) {
-				resolve( false );
-				return;
+	function setAddressConfirmWorking( working ) {
+		var confirm = el( '.cast-address-confirm' );
+		if ( confirm ) {
+			confirm.disabled = working;
+			confirm.setAttribute( 'aria-busy', working ? 'true' : 'false' );
+		}
+	}
+
+	/**
+	 * Start the first publish from the address wizard: a direct, nonce- and
+	 * action-allowlist-gated POST to the start route (like every other
+	 * action) that returns the parsed result — `true` when the run queued,
+	 * `{ refusal }` when the server's start gate refused, `false` when the
+	 * route is unavailable or the request failed — so the wizard can state
+	 * truthfully what happened.
+	 *
+	 * @return {Promise<true|{refusal: ?string}|false>}
+	 */
+	function startFirstPublishFromWizard() {
+		if ( ! nonce || ! post || ! endpoints || ! endpoints.start || actions.indexOf( 'start' ) === -1 ) {
+			return Promise.resolve( false );
+		}
+
+		return post( endpoints.start, {
+			method: 'POST',
+			headers: {
+				'X-WP-Nonce': nonce,
+				'Content-Type': 'application/json'
+			},
+			credentials: 'same-origin',
+			body: JSON.stringify( {} )
+		} ).then( function ( response ) {
+			if ( ! response || ! response.ok ) {
+				return false;
 			}
 
-			post( endpoints.domain_availability, {
-				method: 'GET',
-				headers: { 'X-WP-Nonce': nonce },
-				credentials: 'same-origin'
-			} ).then( function ( response ) {
-				resolve( !!( response && response.ok ) );
-			} ).catch( function () {
-				resolve( false );
-			} );
+			return response.json();
+		} ).then( function ( data ) {
+			if ( ! data ) {
+				return false;
+			}
+
+			if ( data.queued === true ) {
+				return true;
+			}
+
+			return { refusal: data.refusal || null };
+		} ).catch( function () {
+			return false;
 		} );
 	}
 
 	/**
-	 * Bind the server-rendered domain action markers. Each marker's action is
-	 * read from data-domain-action and translated through the allowlist, so a
-	 * forged marker can never reach a domain (or publish) route.
+	 * The one-step confirm: save the destination, confirm it, re-fetch status
+	 * and — only while the fresh report says a first publish can start — start
+	 * the run. A not-publish-ready site (e.g. no eligible content yet) keeps
+	 * its confirmed address with NO publish attempt, and the copy says exactly
+	 * that. A refusal at any step surfaces friendly copy on the wizard's lines
+	 * and nothing downstream fires.
+	 *
+	 * @return {Promise<boolean>}
+	 */
+	function confirmAddress() {
+		if ( addressBusy ) {
+			return Promise.resolve( false );
+		}
+
+		// A stale or polled confirmed/created status never reaches the
+		// destination routes: the choice is frozen, so the mutation is refused
+		// client-side with the same copy the server's refusal would carry.
+		var lifecycle = destinationLifecycleOf( lastStatus );
+		if ( lifecycle !== '' && lifecycle !== 'draft' ) {
+			showAddressWizardError(
+				destinationRefusalCopy( lifecycle === 'confirmed' ? 'confirmed_cannot_change' : 'created_or_attached_cannot_change' )
+			);
+			return Promise.resolve( false );
+		}
+
+		if ( ! destinationRouteAvailable( 'destination_save' ) || ! destinationRouteAvailable( 'destination_confirm' ) ) {
+			showAddressWizardError( 'The address could not be saved. Please try again.' );
+			return Promise.resolve( false );
+		}
+
+		var payload = buildAddressPayload();
+		if ( ! addressPayloadValid( payload ) ) {
+			showAddressWizardError(
+				payload.source === 'existing' ? 'Please choose a site.' : 'Please enter the domain you own.'
+			);
+			return Promise.resolve( false );
+		}
+
+		addressBusy = true;
+		setAddressConfirmWorking( true );
+		showAddressWizardResult( 'Saving your address…' );
+
+		var settle = function () {
+			addressBusy = false;
+			setAddressConfirmWorking( false );
+		};
+
+		return post( endpoints.destination_save, {
+			method: 'POST',
+			headers: {
+				'X-WP-Nonce': nonce,
+				'Content-Type': 'application/json'
+			},
+			credentials: 'same-origin',
+			body: JSON.stringify( payload )
+		} ).then( function ( response ) {
+			if ( ! response || ! response.ok ) {
+				throw new Error( 'destination save failed' );
+			}
+
+			return response.json();
+		} ).then( function ( data ) {
+			if ( ! data || data.status === 'refused' ) {
+				showAddressWizardError( destinationRefusalCopy( data && data.refusal ) );
+				announce( 'The address could not be saved.' );
+				settle();
+				return null;
+			}
+
+			showAddressWizardResult( 'Confirming your address…' );
+
+			return post( endpoints.destination_confirm, {
+				method: 'POST',
+				headers: {
+					'X-WP-Nonce': nonce,
+					'Content-Type': 'application/json'
+				},
+				credentials: 'same-origin',
+				body: JSON.stringify( payload )
+			} ).then( function ( response ) {
+				if ( ! response || ! response.ok ) {
+					throw new Error( 'destination confirm failed' );
+				}
+
+				return response.json();
+			} ).then( function ( confirmData ) {
+				if ( ! confirmData || confirmData.status === 'refused' ) {
+					showAddressWizardError( destinationRefusalCopy( confirmData && confirmData.refusal ) );
+					announce( 'The address could not be confirmed.' );
+					settle();
+					return null;
+				}
+
+				settle();
+
+				// The address is now immutable. Whether this click ALSO starts
+				// the first publish is the server's readiness call, re-read from
+				// the fresh report — the server owns the real start policy, this
+				// only mirrors it client-side.
+				return fetchStatus().then( function () {
+					if ( ! ( lastStatus && ! lastStatus.identity && can( 'start', lastStatus ) ) ) {
+						showAddressWizardResult(
+							'Your address is confirmed. Publishing is available once your site has publishable content.'
+						);
+						announce( 'Your address is confirmed.' );
+						closeAddressWizard();
+						return true;
+					}
+
+					showAddressWizardResult( 'Address confirmed. Starting your first publish…' );
+
+					return startFirstPublishFromWizard().then( function ( started ) {
+						if ( started === true ) {
+							showAddressWizardResult( 'Your address is confirmed and your first publish is queued.' );
+							announce( 'Your first publish is queued.' );
+							closeAddressWizard();
+						} else if ( started && started.refusal ) {
+							// The race: the report looked ready, the server's start
+							// gate refused (content changed between report and
+							// start). The address IS confirmed — say so plus the
+							// refusal copy, and keep the wizard open to be read.
+							showAddressWizardResult( 'Your address is confirmed. ' + startRefusalCopy( started.refusal ) );
+							announce( 'Your address is confirmed.' );
+						} else {
+							showAddressWizardError(
+								'Your address is confirmed, but the publish could not be started. Please try again.'
+							);
+						}
+						return fetchStatus();
+					} );
+				} );
+			} );
+		} ).catch( function () {
+			showAddressWizardError( 'The address could not be saved. Please try again.' );
+			announce( 'The address could not be saved.' );
+			settle();
+			return false;
+		} );
+	}
+
+	/**
+	 * Bind the address surface: the choose/review/confirm controls
+	 * ([data-cast-address-action]; an unknown action is inert), the source
+	 * radios' branch switching, the DNS radios + existing-site select review
+	 * updates, and the existing-site picker fetch. A forged control never
+	 * reaches a destination route.
+	 */
+	function bindAddressWizard() {
+		var controls = document.querySelectorAll( '[data-cast-address-action]' );
+		var i;
+		var control;
+		var action;
+
+		for ( i = 0; i < controls.length; i++ ) {
+			control = controls[ i ];
+			action = control.getAttribute( 'data-cast-address-action' );
+
+			( function ( action ) {
+				control.addEventListener( 'click', function () {
+					if ( action === 'choose' || action === 'review' ) {
+						openAddressWizard();
+					} else if ( action === 'confirm' ) {
+						confirmAddress();
+					}
+					// Any other action is unknown and inert.
+				} );
+			} )( action );
+		}
+
+		var radios = document.querySelectorAll( 'input[name="cast-address-source"]' );
+		for ( i = 0; i < radios.length; i++ ) {
+			( function ( radio ) {
+				radio.addEventListener( 'change', function () {
+					revealAddressBranch( radio.value );
+					updateAddressReview();
+					if ( radio.value === 'existing' ) {
+						refreshExistingPicker();
+					}
+				} );
+			} )( radios[ i ] );
+		}
+
+		var dnsRadios = document.querySelectorAll( 'input[name="cast-address-dns"]' );
+		for ( i = 0; i < dnsRadios.length; i++ ) {
+			dnsRadios[ i ].addEventListener( 'change', updateAddressReview );
+		}
+
+		var namespaceSelect = document.getElementById( 'cast-address-custom-namespace' );
+		if ( namespaceSelect ) {
+			namespaceSelect.addEventListener( 'change', function () {
+				updateAddressNamespaceNote();
+				updateAddressReview();
+			} );
+		}
+
+		var select = document.getElementById( 'cast-address-existing-website' );
+		if ( select ) {
+			select.addEventListener( 'change', updateAddressReview );
+		}
+	}
+
+	/**
+	 * Copy one pinned value to the clipboard (the Copy buttons next to the
+	 * DNS record values). The value is read from the button's own
+	 * data-cast-copy attribute — never re-parsed from the page — and the
+	 * clipboard is only touched when the surface offers one.
+	 *
+	 * @param {string} value
+	 */
+	function copyToClipboard( value ) {
+		if ( window.navigator && window.navigator.clipboard && typeof window.navigator.clipboard.writeText === 'function' ) {
+			window.navigator.clipboard.writeText( value );
+		}
+	}
+
+	/** Bind every [data-cast-copy] Copy button to its pinned value. */
+	function bindCopyControls() {
+		var controls = document.querySelectorAll( '[data-cast-copy]' );
+		var i;
+
+		for ( i = 0; i < controls.length; i++ ) {
+			( function ( control ) {
+				control.addEventListener( 'click', function () {
+					var value = control.getAttribute( 'data-cast-copy' );
+					if ( value !== null ) {
+						copyToClipboard( value );
+					}
+				} );
+			} )( controls[ i ] );
+		}
+	}
+
+	/**
+	 * Bind the connect-your-domain card's action markers ([data-domain-action]
+	 * + [data-domain-id]): only the allowlisted validate/dns/ssl operations
+	 * may fire — a forged marker is inert, like a forged publish button.
 	 */
 	function bindDomainMarkers() {
 		var markers = document.querySelectorAll( '[data-domain-action]' );
@@ -3203,47 +3178,22 @@
 		for ( i = 0; i < markers.length; i++ ) {
 			( function ( marker ) {
 				marker.addEventListener( 'click', function () {
-					fireDomainMarker( marker );
+					var action = domainActionForMarker( marker.getAttribute( 'data-domain-action' ) );
+					var domainId = marker.getAttribute( 'data-domain-id' );
+
+					if ( ! action ) {
+						return;
+					}
+
+					if ( action === 'domain_validate' ) {
+						domainValidate( domainId );
+					} else if ( action === 'domain_dns' ) {
+						domainDns( domainId );
+					} else if ( action === 'domain_ssl' ) {
+						domainSsl( domainId );
+					}
 				} );
 			} )( markers[ i ] );
-		}
-	}
-
-	/**
-	 * Fire one domain marker: map its short action to the allowlisted client
-	 * route and pass the marker's data attributes through.
-	 *
-	 * @param {Element} marker
-	 */
-	function fireDomainMarker( marker ) {
-		var action = domainActionForMarker( marker.getAttribute( 'data-domain-action' ) );
-
-		if ( ! action || domainActions.indexOf( action ) === -1 ) {
-			return;
-		}
-
-		switch ( action ) {
-			case 'domain_bind':
-				domainBind(
-					marker.getAttribute( 'data-domain' ) || '',
-					marker.getAttribute( 'data-domain-namespace' ) || ''
-				);
-				break;
-			case 'domain_verify':
-				domainVerify( marker.getAttribute( 'data-domain-id' ) || '' );
-				break;
-			case 'domain_validate':
-				domainValidate( marker.getAttribute( 'data-domain-id' ) || '' );
-				break;
-			case 'domain_delete':
-				domainDelete( marker.getAttribute( 'data-domain-id' ) || '' );
-				break;
-			case 'domain_dns':
-				domainDns( marker.getAttribute( 'data-domain-id' ) || '' );
-				break;
-			case 'domain_ssl':
-				domainSsl( marker.getAttribute( 'data-domain' ) || '' );
-				break;
 		}
 	}
 
@@ -3290,10 +3240,11 @@
 	}
 
 	/**
-	 * Start the orchestrator: bind action buttons + the Refresh control +
-	 * domain action markers and fetch status immediately. Fully inert (no
-	 * requests, no bindings) without a nonce or endpoint, so a partial/forged
-	 * localized payload can never talk to the REST surface.
+	 * Start the orchestrator: bind action buttons + the Refresh control + the
+	 * address wizard + the Copy controls + the connect-your-domain markers and
+	 * fetch status immediately. Fully inert (no requests, no bindings) without
+	 * a nonce or endpoint, so a partial/forged localized payload can never
+	 * talk to the REST surface.
 	 */
 	function init() {
 		if ( ! nonce || ! post || ! endpoints ) {
@@ -3302,7 +3253,8 @@
 
 		bindButtons();
 		bindRefreshControls();
-		bindWebsiteMarkers();
+		bindAddressWizard();
+		bindCopyControls();
 		bindDomainMarkers();
 		fetchStatus();
 	}
@@ -3339,27 +3291,22 @@
 		fingerprint: fingerprint,
 		workingMessage: workingMessage,
 		syncActions: syncActions,
-		domainList: domainList,
-		domainBind: domainBind,
-		domainVerify: domainVerify,
 		domainValidate: domainValidate,
 		dnsLabelFor: dnsLabelFor,
-		domainDelete: domainDelete,
 		domainDns: domainDns,
 		domainSsl: domainSsl,
-		domainPlatform: domainPlatform,
-		domainAvailability: domainAvailability,
-		// The guided website card (S1) surface.
-		renderWebsiteCard: renderWebsiteCard,
-		buildWebsiteCard: buildWebsiteCard,
-		refreshWebsitePicker: refreshWebsitePicker,
-		renderWebsitePicker: renderWebsitePicker,
-		handleCreateRequest: handleCreateRequest,
-		confirmCreateRequest: confirmCreateRequest,
-		websiteCreateAction: websiteCreateAction,
-		websiteLinkAction: websiteLinkAction,
-		websiteRefusalCopy: websiteRefusalCopy,
-		websiteRouteAvailable: websiteRouteAvailable
+		// The "Your site address" wizard (S5) surface.
+		renderAddressCard: renderAddressCard,
+		destinationLifecycleOf: destinationLifecycleOf,
+		openAddressWizard: openAddressWizard,
+		closeAddressWizard: closeAddressWizard,
+		buildAddressPayload: buildAddressPayload,
+		addressPayloadValid: addressPayloadValid,
+		updateAddressNamespaceNote: updateAddressNamespaceNote,
+		refreshExistingPicker: refreshExistingPicker,
+		confirmAddress: confirmAddress,
+		destinationRefusalCopy: destinationRefusalCopy,
+		destinationRouteAvailable: destinationRouteAvailable
 	};
 
 	window.CastPublish.init();

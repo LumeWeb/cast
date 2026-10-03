@@ -10,6 +10,8 @@ namespace LumeWeb\Cast\Export;
  *  - more()    the stage made progress; more ticks are needed;
  *  - done()    the stage boundary is complete;
  *  - fail(...) the unit failed with a safe, non-credential reason;
+ *  - parked(...) the stage deliberately pauses the run (e.g. the
+ *               custom-domain awaiting-DNS boundary) — no failure, no retry;
  *  - cancel()  the unit asks the whole pipeline to stop cleanly.
  *
  * Besides the done/failure shape, a result carries the stage's next opaque
@@ -29,6 +31,7 @@ final class StageResult
         public readonly int $progress,
         public readonly bool $cancelled,
         public readonly array $warnings,
+        public readonly bool $parked = false,
     ) {
     }
 
@@ -54,6 +57,20 @@ final class StageResult
     public static function fail(string $reason, string $cursor = '', int $progress = 0, array $warnings = []): self
     {
         return new self(false, $reason, $cursor, $progress, false, $warnings);
+    }
+
+    /**
+     * A deliberate pause: the stage recorded its (persisted) boundary state
+     * and asks the orchestrator to pause the run — NOT a failure, so no
+     * retry bookkeeping runs and the preserved identity/artifact resume
+     * through the operator-driven path (e.g. DNS verification +
+     * publish-existing) instead of an automatic re-run.
+     *
+     * @param list<string> $warnings
+     */
+    public static function parked(string $cursor = '', int $progress = 0, array $warnings = []): self
+    {
+        return new self(false, null, $cursor, $progress, false, $warnings, true);
     }
 
     /**

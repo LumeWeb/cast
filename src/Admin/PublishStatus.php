@@ -94,6 +94,27 @@ final class PublishStatus
          * so the "sent — waiting for a website" card surfaces it from here
          * instead of mislabeling it as published. */
         public readonly ?string $awaitingCid = null,
+        /** Explicit custom-domain DNS wait: the run parked at the
+         * awaiting-DNS publish boundary (website created, the domain's DNS
+         * not connected yet). Deliberately its own signal, distinct from
+         * {@see awaitingWebsite} and from a failure: a normal DNS wait is a
+         * waiting state, and the resume is the verified-DNS artifact replay. */
+        public readonly bool $awaitingDns = false,
+        /** The selected custom domain of the parked run while
+         * {@see awaitingDns} is true (from the run's confirmed destination
+         * snapshot), null otherwise — the view quotes exactly this domain,
+         * never an implicit list pick. */
+        public readonly ?string $awaitingDomain = null,
+        /** The persisted first-publish destination setup (lifecycle +
+         * fields), null until one exists. A refresh restores the confirmed
+         * (not-yet-created) choice from this field. */
+        public readonly ?PublishDestinationView $destination = null,
+        /** Onboarding was explicitly SKIPPED (a terminal state like completion,
+         * but the user chose not to run the wizard). A copy-only signal: the
+         * publish UI must never instruct a skipped user to "finish onboarding" —
+         * the truthful next step is publishing. The publish gates deliberately do
+         * NOT read this; they keep using the terminal onboardingComplete flag. */
+        public readonly bool $onboardingSkipped = false,
     ) {
     }
 
@@ -113,6 +134,11 @@ final class PublishStatus
                 $this->envProblems,
             ),
             'onboarding_complete' => $this->onboardingComplete,
+            // Copy-only companion to the terminal flag: the UI distinguishes
+            // "finish onboarding" (incomplete) from "you skipped it, just
+            // publish" (skipped) so a skipped user is never told to finish
+            // something they deliberately skipped.
+            'onboarding_skipped' => $this->onboardingSkipped,
             'has_eligible_content' => $this->hasEligibleContent,
             'mode' => $this->mode->value,
             'auto_active' => $this->autoActive,
@@ -141,6 +167,9 @@ final class PublishStatus
             'connection' => $this->connection?->toArray(),
             'awaiting_website' => $this->awaitingWebsite,
             'awaiting_cid' => $this->awaitingCid,
+            'awaiting_dns' => $this->awaitingDns,
+            'awaiting_domain' => $this->awaitingDomain,
+            'destination' => $this->destination?->toArray(),
         ];
     }
 }

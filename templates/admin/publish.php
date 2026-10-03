@@ -1,34 +1,41 @@
 <?php
 /**
- * Publish admin page — the publish-to-Pinner workflow card.
+ * Publish admin page — the approved publishing-destination layout
+ * (plans/publishing-destination-redesign.md):
  *
- * Presentation / iteration / escaping only. Every display/action decision is
- * resolved by PublishAdminSubscriber via PublishDashboardView and handed in as
- * explicit view data; the template never re-derives a policy from raw status
- * fields. The page is organised as one clear workflow:
+ *   1. Your site address   — the durable address summary (source label +
+ *      address + the "stays the same" note), or the "choose an address"
+ *      prompt. The inline address wizard (three native radio choices with
+ *      branch-specific fields, a plain review and one confirm button) renders
+ *      hidden in the same card and the orchestrator reveals it.
+ *   2. Your publish        — the operational center: state chip, run label,
+ *      stage, progress, last published, the "why" copy, Publish changes /
+ *      Cancel publish / Finish publishing, the queued start-now escape, the
+ *      readiness line and environment problems.
+ *   3. Connect your domain — ONLY when the address is a custom domain: the
+ *      selected domain's DNS steps (values with copy controls), the
+ *      check-again action and the security-certificate status. Platform and
+ *      existing-site destinations never receive registrar/DNS setup copy.
+ *   4. When to publish     — native publish-trigger radios.
+ *   5. Your Pinner account — supporting account/workspace information.
  *
- *   1. Status — what is happening right now (run label, stage, progress, the
- *      published identity/CID, drift/errors).
- *   2. Action — why publishing is needed (or why it isn't available) plus the
- *      prominent "Publish to Pinner" button and the no-refresh result feedback.
- *   3. Secondary actions — the publish trigger mode selector, cancel and
- *      artifact republish, each rendered only when the view model allows it.
- *   4. Readiness, Connection, Domain — the supporting configuration surfaces.
+ * Presentation / escaping only: every display/action decision is resolved by
+ * PublishDashboardView (and DomainDashboardView for the domain block) and
+ * handed in as explicit view data; the template never re-derives a policy
+ * from raw status fields. No output buffering or string-built HTML: the
+ * template emits static markup and escapes every dynamic value. Dedicated
+ * styling lives in assets/css/cast-admin.css (enqueued only on this screen).
  *
- * The page's orchestrator script (status polling against the cast/v1 REST
- * surface) lands with the admin template / JS slice, so this file renders the
- * full server-side workflow and the screen is fully readable before any JS
- * runs.
- *
- * No output buffering or string-built HTML: the template emits static markup
- * and escapes every dynamic value. Dedicated styling lives in
- * assets/css/cast-admin.css (enqueued only on this screen).
+ * The parked post-upload website card and the diagnostics-only Domain panel
+ * (with its generic Actions list and implicit first-domain pick) are gone:
+ * the DNS block below renders only when the panel's domain bundle is the
+ * destination's own domain — an explicit match, never `domains[0]`.
  *
  * Available view keys:
  *   - menuTitle: string
  *   - view: PublishDashboardView  (the publish status view model)
- *   - domainView: DomainDashboardView|null  (the W3 "choose a domain" panel view
- *     model; when provided the domain panel is rendered below the publish card)
+ *   - domainView: DomainDashboardView|null  (the domain setup view model;
+ *     its DNS/SSL blocks are only used inside the custom-domain card)
  *
  * @var array<string, mixed> $view
  */
@@ -40,46 +47,261 @@ $publish = $view['view'];
 $readinessLabels = [
     'ready' => 'Ready to publish',
     'config' => 'Configuration required',
-    'setup' => 'Finish onboarding to publish',
+    // The setup slot is the one onboarding instruction and it is
+    // skipped-aware: an incomplete onboarding says "finish onboarding", while
+    // a deliberately skipped one never instructs finishing it — the truthful
+    // next step is publishing. (The value is the view model's copy-only
+    // onboardingSkipped passthrough; the template only maps it to copy.)
+    'setup' => $publish->onboardingSkipped
+        ? 'Onboarding skipped — publish when ready'
+        : 'Finish onboarding to publish',
     'no_content' => 'No publishable content yet',
+    'choose_address' => 'Choose an address to publish',
 ];
 $readinessLabel = $readinessLabels[$publish->readiness] ?? 'Ready to publish';
 
-$modeDescriptions = [
-    'manual' => 'Manual publishing',
-    'on_update' => 'Publishes automatically when you update content',
-];
-$modeDescription = $modeDescriptions[$publish->mode] ?? 'Manual publishing';
-
+// The "when to publish" trigger: native radios with first-time-owner labels.
+// The per-option help pins the exact ContentPublishScheduler semantics:
+// Manual is drift-only (a click queues a background publish), On-update
+// auto-schedules a debounced/coalesced background publish. No wording may
+// imply synchronous publishing. Mirrored client-side by cast-publish.js.
 $modeOptions = [
-    ['value' => 'manual', 'label' => 'Manual'],
-    ['value' => 'on_update', 'label' => 'On update'],
+    ['value' => 'manual', 'label' => 'Only when I choose'],
+    ['value' => 'on_update', 'label' => 'When I update my site'],
 ];
-
-// End-user copy for each trigger mode, pinned to the exact current semantics
-// in ContentPublishScheduler: Manual is drift-only (never schedules, a click
-// only queues a background publish), On-update auto-schedules a debounced/
-// coalesced background publish on publish-relevant content transitions. No
-// wording may imply synchronous publishing — every action queues, the worker
-// runs it. Only these two modes exist — a legacy stored 'scheduled' value is
-// migrated server-side to On-update and never surfaces here. This copy is
-// mirrored client-side by cast-publish.js.
 $modeHelp = [
     'manual' => 'Publish only when you choose. Clicking Publish to Pinner queues a background publish — content edits wait until then and nothing publishes on its own.',
     'on_update' => 'Publish automatically. Eligible content changes queue a background publish for you — rapid edits are combined into one debounced publish instead of one per save.',
 ];
 $activeModeHelp = $modeHelp[$publish->mode] ?? $modeHelp['manual'];
 $primaryAction = $publish->primaryAction;
+
+// When the trigger selector is withheld (a non-ready surface, or a live
+// run), the card carries ONE concise informative line — never an empty
+// heading. The values (canChangeMode/runState) are the pinned view-model
+// decisions; this table only maps them to copy.
+$modeLockedMessage = $publish->canChangeMode ? null : (in_array($publish->runState, [
+    \LumeWeb\Cast\Admin\PublishDashboardView::RUN_STATE_QUEUED,
+    \LumeWeb\Cast\Admin\PublishDashboardView::RUN_STATE_RUNNING,
+    \LumeWeb\Cast\Admin\PublishDashboardView::RUN_STATE_PAUSED,
+], true)
+    ? 'The publish trigger is locked while a publish is in progress.'
+    : 'You can choose a publish trigger once your site is ready to publish.');
+
+// ------------------------- your site address -------------------------
+//
+// The durable address summary is a passthrough of the persisted destination
+// setup (PublishDashboardView::$destination / $destinationLifecycle): the
+// template only maps source → label and composes the display address, never
+// re-derives a policy. A generated platform address has no concrete name
+// until the first publish creates it, so it reads as a plain promise.
+$destination = $publish->destination;
+$destinationLifecycle = $publish->destinationLifecycle;
+$addressSource = $destination !== null && isset($destination['source']) ? (string) $destination['source'] : null;
+$addressSourceLabel = match ($addressSource) {
+    'platform' => 'Pinner address',
+    'custom' => 'Your own domain',
+    'existing' => 'Existing Pinner site',
+    default => null,
+};
+$platformDomain = $destination !== null && !empty($destination['platform_domain']) ? (string) $destination['platform_domain'] : '';
+$platformLabel = $destination !== null && !empty($destination['label']) ? (string) $destination['label'] : '';
+$addressValue = match ($addressSource) {
+    'platform' => $platformLabel !== ''
+        ? ($platformDomain !== '' ? $platformLabel . '.' . $platformDomain : $platformLabel)
+        : 'A free Pinner address',
+    'custom', 'existing' => $destination !== null && !empty($destination['domain']) ? (string) $destination['domain'] : '',
+    default => '',
+};
+$addressDomain = $addressSource === 'custom' || $addressSource === 'existing' ? $addressValue : '';
+// The summary's closing note follows the destination lifecycle: a draft
+// promises durability, a confirmed (not-yet-created) choice is a concise
+// FROZEN summary, and a created/attached address is final.
+$addressDurableNote = match ($destinationLifecycle) {
+    'confirmed' => 'Your address is confirmed and can no longer be changed.',
+    'created_or_attached' => 'Your address is live and can no longer be changed.',
+    default => 'Your address stays the same after your first publish.',
+};
+// The address may be reviewed only while the choice is still a DRAFT: a
+// confirmed (frozen) or created/attached choice shows a concise summary with
+// no review/edit entry, and once the site is live (a website identity
+// exists) the choice is final.
+$isFirstPublish = $publish->websiteName === null;
+$canReviewAddress = $addressSource !== null
+    && $isFirstPublish
+    && $destinationLifecycle === 'draft';
+
+// The wizard's prefill: a refresh must never lose an unconfirmed choice, so
+// the server render carries the persisted draft into the branch inputs.
+$wizardSource = $addressSource ?? 'platform';
+
+// The wizard's confirm button promises the publish ONLY when the server's own
+// first-publish start decision (PublishDashboardView::$canStart) says a run
+// may start right now — a fresh site with no eligible content is not
+// publish-ready, so its button truthfully says "Create address". Mirrored
+// client-side by addressConfirmLabelFor() in cast-publish.js.
+$addressConfirmLabel = $publish->canStart ? 'Create address and publish' : 'Create address';
+$wizardCustomDomain = $wizardSource === 'custom' ? $addressValue : '';
+$wizardNamespace = $wizardSource === 'custom' && !empty($destination['namespace']) ? (string) $destination['namespace'] : 'icann';
+$wizardDnsManaged = ! ( $wizardSource === 'custom'
+    && $destination !== null
+    && isset( $destination['dns_hosting_enabled'] )
+    && $destination['dns_hosting_enabled'] === false );
+$wizardExistingId = $wizardSource === 'existing' && !empty($destination['website_id']) ? (string) $destination['website_id'] : '';
+// The wizard's plain review read-out, prefilled from the persisted draft so a
+// refresh never loses the unconfirmed choice's review. A generated platform
+// address is phrased as Pinner CREATING a free address — never "available
+// at …", which no generated address is.
+$wizardReviewCopy = match (true) {
+    $wizardSource === 'platform' => 'Pinner will create a free address for your site. You cannot change this address after your first publish.',
+    $wizardSource === 'custom' && $wizardCustomDomain !== '' => 'Your site will be available at ' . $wizardCustomDomain . '. You cannot change this address after your first publish.',
+    $wizardSource === 'existing' && $wizardExistingId !== '' => 'Your site will be available at ' . $addressValue . '. You cannot change this address after your first publish.',
+    default => '',
+};
 ?>
 <div class="wrap cast-publish-wrap">
 
     <header class="cast-publish-header">
         <h1><?php echo esc_html($view['menuTitle'] ?? ''); ?></h1>
-        <p class="cast-publish-subtitle"><?php echo esc_html('Publish your site to Pinner and keep it live.'); ?></p>
+        <p class="cast-publish-subtitle"><?php echo esc_html('Put your latest changes online.'); ?></p>
     </header>
 
+    <?php // 1 — YOUR SITE ADDRESS ?>
+    <section class="card cast-address-card" aria-labelledby="cast-address-heading">
+        <h2 id="cast-address-heading"><?php echo esc_html('Your site address'); ?></h2>
+
+        <?php if ($addressSource === null) : ?>
+            <p class="cast-address-prompt"><?php echo esc_html('Choose an address for your site.'); ?></p>
+            <button type="button" class="button button-primary cast-address-choose"
+                    data-cast-address-action="choose"><?php echo esc_html('Choose address'); ?></button>
+        <?php else : ?>
+            <p class="cast-address-state">
+                <span class="cast-address-source cast-address-source-<?php echo esc_attr($addressSource); ?>">
+                    <?php echo esc_html($addressSourceLabel); ?>
+                </span>
+            </p>
+            <p class="cast-address-value"><?php echo esc_html($addressValue); ?></p>
+            <p class="cast-address-durable"><?php echo esc_html($addressDurableNote); ?></p>
+            <?php if ($canReviewAddress) : ?>
+                <button type="button" class="button cast-address-review"
+                        data-cast-address-action="review"><?php echo esc_html('Review address'); ?></button>
+            <?php endif; ?>
+        <?php endif; ?>
+
+        <?php
+        // The inline address wizard: a focused guide, not a second dashboard.
+        // It renders hidden in the server paint (the no-JS prompt above stays
+        // the entry point) and the orchestrator reveals it on "Choose
+        // address" / "Review address". Exactly three native radio choices;
+        // each branch exposes only its own fields. The final review is a
+        // plain read-out — the user never re-types the domain to confirm.
+        ?>
+        <div class="cast-address-wizard" data-cast-address-wizard hidden>
+            <h3 id="cast-address-wizard-heading"><?php echo esc_html('Choose an address for your site'); ?></h3>
+
+            <fieldset class="cast-address-wizard-sources" aria-labelledby="cast-address-wizard-heading">
+                <label class="cast-address-source-option">
+                    <input type="radio" name="cast-address-source" value="platform"
+                           class="cast-address-source-input"
+                           <?php echo $wizardSource === 'platform' ? 'checked' : ''; ?>>
+                    <span class="cast-address-source-name"><?php echo esc_html('Get a free Pinner address'); ?></span>
+                    <span class="cast-address-source-help"><?php echo esc_html('Pinner sets it up and looks after it.'); ?></span>
+                </label>
+                <label class="cast-address-source-option">
+                    <input type="radio" name="cast-address-source" value="custom"
+                           class="cast-address-source-input"
+                           <?php echo $wizardSource === 'custom' ? 'checked' : ''; ?>>
+                    <span class="cast-address-source-name"><?php echo esc_html('Use a domain you own'); ?></span>
+                    <span class="cast-address-source-help"><?php echo esc_html('A domain you already own, like shop.example.com.'); ?></span>
+                </label>
+                <label class="cast-address-source-option">
+                    <input type="radio" name="cast-address-source" value="existing"
+                           class="cast-address-source-input"
+                           <?php echo $wizardSource === 'existing' ? 'checked' : ''; ?>>
+                    <span class="cast-address-source-name"><?php echo esc_html('Use a Pinner site you already have'); ?></span>
+                    <span class="cast-address-source-help"><?php echo esc_html('Pick a site from your Pinner account.'); ?></span>
+                </label>
+            </fieldset>
+
+            <div class="cast-address-branch" data-cast-address-branch="platform"
+                 <?php echo $wizardSource === 'platform' ? '' : 'hidden'; ?>>
+                <p class="cast-address-branch-note"><?php echo esc_html('There is nothing to fill in — Pinner creates your free address when you first publish.'); ?></p>
+            </div>
+
+            <div class="cast-address-branch" data-cast-address-branch="custom"
+                 <?php echo $wizardSource === 'custom' ? '' : 'hidden'; ?>>
+                <label class="cast-address-field-label" for="cast-address-custom-domain"><?php echo esc_html('Your domain'); ?></label>
+                <input type="text" id="cast-address-custom-domain" class="cast-address-custom-domain"
+                       placeholder="e.g. shop.example.com" autocomplete="off"
+                       value="<?php echo esc_attr($wizardCustomDomain); ?>">
+                <label class="cast-address-field-label" for="cast-address-custom-namespace"><?php echo esc_html('Domain type'); ?></label>
+                <select id="cast-address-custom-namespace" class="cast-address-custom-namespace">
+                    <option value="icann" <?php echo $wizardNamespace === 'icann' ? 'selected' : ''; ?>><?php echo esc_html('A standard domain (e.g. .com)'); ?></option>
+                    <option value="hns" <?php echo $wizardNamespace === 'hns' ? 'selected' : ''; ?>><?php echo esc_html('A Handshake (HNS) name'); ?></option>
+                </select>
+                <fieldset class="cast-address-dns-options">
+                    <legend class="cast-address-field-label"><?php echo esc_html('Who handles the DNS setup?'); ?></legend>
+                    <label class="cast-address-dns-option">
+                        <input type="radio" name="cast-address-dns" value="managed"
+                               <?php echo $wizardDnsManaged ? 'checked' : ''; ?>>
+                        <?php echo esc_html('Let Pinner handle DNS'); ?>
+                    </label>
+                    <details class="cast-address-advanced"
+                             <?php echo $wizardDnsManaged ? '' : 'open'; ?>>
+                        <summary class="cast-address-advanced-summary"><?php echo esc_html('Advanced'); ?></summary>
+                        <label class="cast-address-dns-option">
+                            <input type="radio" name="cast-address-dns" value="self"
+                                   <?php echo $wizardDnsManaged ? '' : 'checked'; ?>>
+                            <?php echo esc_html('I will handle DNS'); ?>
+                        </label>
+                    </details>
+                </fieldset>
+                <?php
+                // Namespace-specific DNS copy: ICANN and HNS names work
+                // differently, so the note follows the chosen domain type.
+                // The HNS note stays plain (no "HIP-5"/contract jargon):
+                // the records are held on-chain at the name's parent and
+                // Pinner manages them — the exact nameserver values may
+                // appear here later.
+                ?>
+                <p class="cast-address-namespace-note" data-cast-namespace-note="icann"
+                   <?php echo $wizardNamespace === 'hns' ? 'hidden' : ''; ?>>
+                    <?php echo esc_html('Pinner creates and manages the DNS records for this domain.'); ?>
+                </p>
+                <p class="cast-address-namespace-note" data-cast-namespace-note="hns"
+                   <?php echo $wizardNamespace === 'hns' ? '' : 'hidden'; ?>>
+                    <?php echo esc_html('For Handshake (HNS) names, the DNS records are held on-chain at the name’s parent. Pinner manages this for you, and the exact nameserver values may appear here later.'); ?>
+                </p>
+            </div>
+
+            <div class="cast-address-branch" data-cast-address-branch="existing"
+                 <?php echo $wizardSource === 'existing' ? '' : 'hidden'; ?>>
+                <label class="cast-address-field-label" for="cast-address-existing-website"><?php echo esc_html('Choose a site'); ?></label>
+                <select id="cast-address-existing-website" class="cast-address-existing-website">
+                    <?php if ($wizardExistingId !== '') : ?>
+                        <option value="<?php echo esc_attr($wizardExistingId); ?>" selected><?php echo esc_html($addressValue); ?></option>
+                    <?php endif; ?>
+                </select>
+                <p class="cast-address-existing-loading" role="status" aria-live="polite" hidden><?php echo esc_html('Loading your Pinner sites…'); ?></p>
+                <p class="cast-address-existing-error notice notice-error" aria-live="polite" hidden></p>
+                <p class="cast-address-existing-empty" <?php echo $wizardExistingId !== '' ? 'hidden' : ''; ?>><?php echo esc_html('No Pinner sites available to use. Create one in Pinner first.'); ?></p>
+            </div>
+
+            <div class="cast-address-review-box" data-cast-address-review hidden>
+                <p class="cast-address-review-copy"><?php echo esc_html($wizardReviewCopy); ?></p>
+            </div>
+
+            <p class="cast-address-wizard-error notice notice-error" aria-live="polite" hidden></p>
+            <p class="cast-address-wizard-result" aria-live="polite"></p>
+
+            <button type="button" class="button button-primary cast-address-confirm"
+                    data-cast-address-action="confirm" disabled><?php echo esc_html($addressConfirmLabel); ?></button>
+        </div>
+    </section>
+
+    <?php // 2 — YOUR PUBLISH ?>
     <section class="card cast-publish-card" aria-labelledby="cast-publish-state-heading">
-        <h2 id="cast-publish-state-heading"><?php echo esc_html('Status'); ?></h2>
+        <h2 id="cast-publish-state-heading"><?php echo esc_html('Your publish'); ?></h2>
 
         <p class="cast-publish-state">
             <span class="cast-publish-state-chip cast-publish-state-<?php echo esc_attr($publish->runState); ?>" role="status">
@@ -142,50 +364,33 @@ $primaryAction = $publish->primaryAction;
             <span class="cast-publish-last-checked-label"><?php echo esc_html('Last checked'); ?></span>:
             <span class="cast-publish-last-checked-time"><?php echo esc_html('Just now'); ?></span>
         </p>
-    </section>
 
-    <?php
-    // The guided website choice card for a parked first publish ("sent —
-    // waiting for a website"). The status chip and context line up top already
-    // name the wait; this card is the actionable choice surface. The server
-    // only renders it while the view model reports awaitingWebsite — an
-    // ordinary poll never carries it — and the no-refresh orchestrator mirrors
-    // that by building the same card into the root placeholder below when a
-    // poll catches a park the server had not rendered.
-    $awaitingWebsite = $publish->awaitingWebsite;
-    ?>
-    <div class="cast-website-root" data-cast-website-root>
-        <?php if ($awaitingWebsite) : ?>
-            <section class="card cast-website-card" aria-labelledby="cast-website-heading">
-                <h2 id="cast-website-heading"><?php echo esc_html('Publish to Pinner needs a website.'); ?></h2>
-
-                <p class="cast-website-subline"><?php echo esc_html('A website tells Pinner where to serve your upload. Create one, or link one you already own.'); ?></p>
-
-                <p class="cast-website-cid"><?php echo esc_html('Preserved CID'); ?>: <?php echo esc_html((string) $publish->websiteCid); ?></p>
-
-                <div class="cast-website-path cast-website-path-create">
-                    <h3><?php echo esc_html('Create a new website'); ?></h3>
-                    <label class="cast-website-hostname-label" for="cast-website-hostname"><?php echo esc_html('Web address (optional)'); ?></label>
-                    <input type="text" id="cast-website-hostname" class="cast-website-hostname" autocomplete="off" placeholder="e.g. mysite.com" />
-                    <button type="button" class="button button-primary cast-website-create" data-website-action="create"><?php echo esc_html('Create website'); ?></button>
-                    <p class="cast-website-create-confirm" hidden><?php echo esc_html('Platform domain will be auto-generated — continue?'); ?></p>
-                    <button type="button" class="button cast-website-create-confirm-btn" data-website-action="create-confirm" hidden><?php echo esc_html('Yes, auto-generate'); ?></button>
-                </div>
-
-                <div class="cast-website-path cast-website-path-link">
-                    <h3><?php echo esc_html('Link a website you already have'); ?></h3>
-                    <ul class="cast-website-picker"></ul>
-                    <p class="cast-website-link-empty" hidden><?php echo esc_html('No websites available to link. Create one, or handle it in Pinner.'); ?></p>
-                </div>
-
-                <p class="cast-website-error notice notice-error" aria-live="polite" hidden></p>
-                <p class="cast-website-result" aria-live="polite"></p>
-            </section>
+        <?php
+        // The readiness line is HIDDEN while onboarding is outstanding:
+        // its label would repeat the context line's instruction verbatim
+        // ("Finish onboarding to publish" / "…publish your site."). The
+        // context line is the one clear instruction. The element stays in
+        // the DOM (empty) so the orchestrator can repopulate it when a
+        // later poll reports a different readiness.
+        ?>
+        <?php if ($publish->readiness === 'setup') : ?>
+            <p class="cast-publish-readiness-level cast-publish-level-setup" hidden></p>
+        <?php else : ?>
+            <p class="cast-publish-readiness-level cast-publish-level-<?php echo esc_attr($publish->readiness); ?>">
+                <?php echo esc_html($readinessLabel); ?>
+            </p>
         <?php endif; ?>
-    </div>
 
-    <section class="card cast-publish-action-card" aria-labelledby="cast-publish-action-heading">
-        <h2 id="cast-publish-action-heading"><?php echo esc_html('Publish'); ?></h2>
+        <?php if ($publish->envProblems !== []) : ?>
+            <ul class="cast-publish-env-problems">
+                <?php foreach ($publish->envProblems as $problem) : ?>
+                    <li class="cast-publish-env-problem">
+                        <code><?php echo esc_html($problem['variable']); ?></code>
+                        <?php echo esc_html($problem['message']); ?>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
 
         <p class="cast-publish-context" id="cast-publish-context"><?php echo esc_html($publish->contextMessage); ?></p>
 
@@ -194,7 +399,7 @@ $primaryAction = $publish->primaryAction;
                     data-cast-publish-action="<?php echo esc_attr($primaryAction ?? ''); ?>"
                     <?php echo $primaryAction === null ? 'disabled' : ''; ?>
                     aria-describedby="cast-publish-context">
-                <?php echo esc_html('Publish to Pinner'); ?>
+                <?php echo esc_html('Publish changes'); ?>
             </button>
         </p>
 
@@ -210,50 +415,14 @@ $primaryAction = $publish->primaryAction;
             </div>
         <?php endif; ?>
 
-        <?php if ($publish->canChangeMode) : ?>
-            <div class="cast-publish-secondary-actions">
-                <span class="cast-publish-mode-label" id="cast-publish-mode-label"><?php echo esc_html('Publish trigger'); ?></span>
-                <div class="cast-publish-mode-options" role="group" aria-labelledby="cast-publish-mode-label">
-                    <?php foreach ($modeOptions as $modeOption) : ?>
-                        <?php $modeSelected = $publish->mode === $modeOption['value']; ?>
-                        <button type="button"
-                                class="cast-publish-mode-option<?php echo $modeSelected ? ' is-active' : ''; ?>"
-                                data-cast-publish-action="mode"
-                                data-cast-publish-value="<?php echo esc_attr($modeOption['value']); ?>"
-                                aria-pressed="<?php echo $modeSelected ? 'true' : 'false'; ?>"
-                                <?php echo $modeSelected ? 'disabled' : ''; ?>
-                                aria-describedby="cast-publish-mode-help-<?php echo esc_attr($modeOption['value']); ?>">
-                            <?php echo esc_html($modeOption['label']); ?>
-                        </button>
-                        <span class="cast-publish-mode-help-sr" id="cast-publish-mode-help-<?php echo esc_attr($modeOption['value']); ?>"><?php echo esc_html($modeHelp[$modeOption['value']]); ?></span>
-                    <?php endforeach; ?>
-                </div>
-                <p class="cast-publish-mode-help" id="cast-publish-mode-help" aria-live="polite">
-                    <?php echo esc_html($activeModeHelp); ?>
-                </p>
-            </div>
-        <?php endif; ?>
-
         <?php if ($publish->canCancel || $publish->canPublishArtifact) : ?>
             <div class="cast-publish-secondary-actions">
                 <?php if ($publish->canCancel) : ?>
                     <button type="button" class="button cast-publish-cancel" data-cast-publish-action="cancel"><?php echo esc_html('Cancel publish'); ?></button>
                 <?php endif; ?>
                 <?php if ($publish->canPublishArtifact) : ?>
-                    <button type="button" class="button cast-publish-republish" data-cast-publish-action="artifact"><?php echo esc_html('Republish the latest build'); ?></button>
+                    <button type="button" class="button cast-publish-republish" data-cast-publish-action="artifact"><?php echo esc_html('Finish publishing'); ?></button>
                 <?php endif; ?>
-            </div>
-        <?php endif; ?>
-
-        <?php if ($publish->awaitingWebsite) : ?>
-            <?php
-            // The resume-with-same-CID affordance for a parked first publish:
-            // re-points/retries the preserved CID through the existing
-            // publishExisting route without re-uploading the pack. Deliberately
-            // NOT inside the website card so it stays reachable while awaiting.
-            ?>
-            <div class="cast-publish-secondary-actions">
-                <button type="button" class="button cast-website-resume" data-cast-publish-action="artifact"><?php echo esc_html('Resume with this CID'); ?></button>
             </div>
         <?php endif; ?>
 
@@ -262,143 +431,47 @@ $primaryAction = $publish->primaryAction;
         </div>
     </section>
 
-    <section class="card cast-publish-readiness" aria-labelledby="cast-publish-readiness-heading">
-        <h2 id="cast-publish-readiness-heading"><?php echo esc_html('Readiness'); ?></h2>
+    <?php
+    // 3 — CONNECT YOUR DOMAIN (custom destinations only).
+    //
+    // The card is scoped to the destination's own domain: the DNS/SSL blocks
+    // from the domain panel render only when the panel's domain bundle IS the
+    // destination domain (an explicit name match). A bundle for any other
+    // domain — including an implicit first-list pick — never leaks in, and
+    // platform/existing destinations never reach this card at all.
+    $domainPanel = $view['domainView'] ?? null;
+    $domainCardMatch = $domainPanel !== null
+        && $domainPanel->dnsDomain !== null
+        && $addressDomain !== ''
+        && ($domainPanel->dnsDomain['domain'] ?? '') === $addressDomain;
+    ?>
+    <?php if ($addressSource === 'custom' && $addressDomain !== '') : ?>
+        <section class="card cast-domain-setup-card" aria-labelledby="cast-domain-setup-heading">
+            <h2 id="cast-domain-setup-heading"><?php echo esc_html('Connect your domain'); ?></h2>
 
-        <p class="cast-publish-readiness-level cast-publish-level-<?php echo esc_attr($publish->readiness); ?>">
-            <?php echo esc_html($readinessLabel); ?>
-        </p>
-
-        <p class="cast-publish-mode"><?php echo esc_html($modeDescription); ?></p>
-
-        <?php if ($publish->envProblems !== []) : ?>
-            <ul class="cast-publish-env-problems">
-                <?php foreach ($publish->envProblems as $problem) : ?>
-                    <li class="cast-publish-env-problem">
-                        <code><?php echo esc_html($problem['variable']); ?></code>
-                        <?php echo esc_html($problem['message']); ?>
-                    </li>
-                <?php endforeach; ?>
-            </ul>
-        <?php endif; ?>
-    </section>
-
-    <?php if ($publish->connection instanceof \LumeWeb\Cast\Admin\ConnectionView) : ?>
-        <section class="card cast-connection-card" aria-labelledby="cast-connection-heading">
-            <h2 id="cast-connection-heading"><?php echo esc_html('Connection'); ?></h2>
-
-            <?php if ($publish->connection->isResolved()) : ?>
-                <p class="cast-connection-state cast-connection-state-resolved"><?php echo esc_html('Connected'); ?></p>
-                <dl class="cast-connection-details">
-                    <?php if ($publish->connection->accountName() !== null && $publish->connection->accountName() !== '') : ?>
-                        <dt><?php echo esc_html('Account'); ?></dt>
-                        <dd><?php echo esc_html($publish->connection->accountName()); ?></dd>
-                    <?php endif; ?>
-                    <?php if ($publish->connection->accountEmail() !== null && $publish->connection->accountEmail() !== '') : ?>
-                        <dt><?php echo esc_html('Email'); ?></dt>
-                        <dd><?php echo esc_html($publish->connection->accountEmail()); ?></dd>
-                    <?php endif; ?>
-                    <?php if ($publish->connection->workspaceLabel() !== null && $publish->connection->workspaceLabel() !== '') : ?>
-                        <dt><?php echo esc_html('Workspace'); ?></dt>
-                        <dd><?php echo esc_html($publish->connection->workspaceLabel()); ?></dd>
-                    <?php endif; ?>
-                    <?php if ($publish->connection->workspaceDomain() !== null && $publish->connection->workspaceDomain() !== '') : ?>
-                        <dt><?php echo esc_html('Domain'); ?></dt>
-                        <dd><?php echo esc_html($publish->connection->workspaceDomain()); ?></dd>
-                    <?php endif; ?>
-                </dl>
-            <?php else : ?>
-                <p class="cast-connection-state cast-connection-state-<?php echo esc_attr($publish->connection->state()); ?>">
-                    <?php echo esc_html('Connection unavailable'); ?>
-                </p>
-                <?php if ($publish->connection->error() !== null) : ?>
-                    <p class="cast-connection-error notice notice-error"><?php echo esc_html($publish->connection->error()); ?></p>
-                <?php endif; ?>
-            <?php endif; ?>
-        </section>
-    <?php endif; ?>
-
-    <?php $domainPanel = $view['domainView'] ?? null; ?>
-    <?php if ($domainPanel instanceof \LumeWeb\Cast\Admin\DomainDashboardView) : ?>
-        <section class="card cast-domain-panel" aria-labelledby="cast-domain-heading">
-            <h2 id="cast-domain-heading"><?php echo esc_html('Domain'); ?></h2>
-
-            <p class="cast-publish-readiness-level cast-domain-state cast-publish-level-<?php echo esc_attr($domainPanel->stateLevel); ?>">
-                <?php echo esc_html($domainPanel->stateLabel); ?>
+            <p class="cast-domain-setup-domain"><?php echo esc_html($addressDomain); ?></p>
+            <p class="cast-domain-setup-dns-mode">
+                <?php echo esc_html(!empty($destination['dns_hosting_enabled'])
+                    ? 'Pinner is handling the DNS for you.'
+                    : 'You are handling the DNS yourself.'); ?>
             </p>
 
-            <?php
-            // The list-refusal line only earns its own paragraph when it says
-            // something the panel state line has not already said: in the
-            // identity-missing state both resolve to "Publish your site to
-            // begin managing domains." and echoing it twice is a visible
-            // duplicate line, so the refusal is only kept when its label is
-            // genuinely distinct (e.g. a reachability error). The refusal
-            // still suppresses the empty/list branches below it either way.
-            $domainRefusalLabel = $domainPanel->listRefusal['label'] ?? null;
-            ?>
-            <?php if ($domainPanel->listRefusal !== null) : ?>
-                <?php if ($domainRefusalLabel !== $domainPanel->stateLabel) : ?>
-                    <p class="cast-domain-list-refusal cast-publish-level-<?php echo esc_attr($domainPanel->listRefusal['level']); ?>">
-                        <?php echo esc_html($domainRefusalLabel); ?>
-                    </p>
-                <?php endif; ?>
-            <?php elseif ($domainPanel->domains === []) : ?>
-                <p class="cast-domain-list-empty"><?php echo esc_html('No domains bound yet.'); ?></p>
-            <?php else : ?>
-                <ul class="cast-domain-list">
-                    <?php foreach ($domainPanel->domains as $row) : ?>
-                        <li class="cast-domain-row">
-                            <span class="cast-domain-name"><?php echo esc_html($row['domain']); ?></span>
-                            <?php if (isset($row['namespace']) && $row['namespace'] !== '') : ?>
-                                <span class="cast-domain-namespace"><?php echo esc_html($row['namespace']); ?></span>
-                            <?php endif; ?>
-                            <?php if (isset($row['status']) && $row['status'] !== '') : ?>
-                                <span class="cast-domain-status"><?php echo esc_html($row['status']); ?></span>
-                            <?php endif; ?>
-                            <?php if (isset($row['dns_hosting_enabled']) && (bool) $row['dns_hosting_enabled']) : ?>
-                                <span class="cast-domain-hosted"><?php echo esc_html('DNS hosted'); ?></span>
-                            <?php endif; ?>
-                            <?php if (isset($row['gateway_host']) && $row['gateway_host'] !== null && $row['gateway_host'] !== '') : ?>
-                                <span class="cast-domain-gateway"><?php echo esc_html($row['gateway_host']); ?></span>
-                            <?php endif; ?>
-                        </li>
-                    <?php endforeach; ?>
-                </ul>
-            <?php endif; ?>
+            <h3 class="cast-domain-section"><?php echo esc_html('What to change'); ?></h3>
+            <p class="cast-publish-readiness-level cast-domain-dns-label cast-publish-level-<?php echo esc_attr($domainPanel?->dnsLevel ?? 'note'); ?>">
+                <?php echo esc_html($domainPanel?->dnsLabel ?? 'The DNS steps will appear here once your site is published.'); ?>
+            </p>
 
-            <?php if ($domainPanel->hasWebsite) : ?>
-                <h3 class="cast-domain-section"><?php echo esc_html('SSL'); ?></h3>
-                <p class="cast-publish-readiness-level cast-domain-ssl-label cast-publish-level-<?php echo esc_attr($domainPanel->sslLevel); ?>">
-                    <?php echo esc_html($domainPanel->sslLabel); ?>
-                </p>
-                <?php if ($domainPanel->ssl !== null && $domainPanel->ssl !== []) : ?>
-                    <dl class="cast-domain-records cast-domain-ssl-records">
-                        <?php if (isset($domainPanel->ssl['status']) && $domainPanel->ssl['status'] !== null && $domainPanel->ssl['status'] !== '') : ?>
-                            <dt><?php echo esc_html('Status'); ?></dt>
-                            <dd><?php echo esc_html((string) $domainPanel->ssl['status']); ?></dd>
-                        <?php endif; ?>
-                        <?php if (isset($domainPanel->ssl['issued_at']) && $domainPanel->ssl['issued_at'] !== null && $domainPanel->ssl['issued_at'] !== '') : ?>
-                            <dt><?php echo esc_html('Issued'); ?></dt>
-                            <dd><?php echo esc_html((string) $domainPanel->ssl['issued_at']); ?></dd>
-                        <?php endif; ?>
-                    </dl>
-                <?php endif; ?>
-
-                <h3 class="cast-domain-section"><?php echo esc_html('DNS delegation'); ?></h3>
-                <p class="cast-publish-readiness-level cast-domain-dns-label cast-publish-level-<?php echo esc_attr($domainPanel->dnsLevel); ?>">
-                    <?php echo esc_html($domainPanel->dnsLabel); ?>
-                </p>
+            <?php if ($domainCardMatch) : ?>
                 <?php
                 // The DNS delegation guidance block. The data is the same
                 // JSON-safe serialization the JS renderDomainDns() rebuilds on
-                // the "View DNS delegation records" action, so the initial
-                // server paint (and no-JS users) see the same managed / HNS /
-                // self-managed records the client re-fetch shows. Every value
-                // below is a server echo of the delegation/check DTOs — DNSSEC
-                // state and per-record checks are rendered verbatim, never
-                // derived here. Comments explain intent; this template never
-                // computes a record.
+                // the "check again" action, so the initial server paint (and
+                // no-JS users) see the same managed / HNS / self-managed
+                // records the client re-fetch shows. Every value below is a
+                // server echo of the delegation/check DTOs — DNSSEC state and
+                // per-record checks are rendered verbatim, never derived here.
+                // Comments explain intent; this template never computes a
+                // record. Each value carries a copy control beside it.
                 $dnsBlock = $domainPanel->dnsDomain;
                 if ($dnsBlock !== null) {
                     $dnsDelegation = isset($dnsBlock['delegation']) && is_array($dnsBlock['delegation']) ? $dnsBlock['delegation'] : null;
@@ -420,7 +493,23 @@ $primaryAction = $publish->primaryAction;
                     $dnsDnssecError = $dnsDelegation !== null && isset($dnsDelegation['dnssec_error']) ? (string) $dnsDelegation['dnssec_error'] : '';
                     $dnsIcann = $dnsNamespace === 'icann';
                     $dnsIsHns = $dnsNamespace === 'hns';
+                    // On-chain managed (an HNS binding whose DNS is served by
+                    // an external on-chain contract): a distinct state checked
+                    // BEFORE the managed / self-managed delegation branches,
+                    // so it never inherits their copy.
+                    $dnsOnchain = isset($dnsBlock['status']) && $dnsBlock['status'] === 'onchain_managed';
                 }
+                // A copy control beside one DNS value: a real button carrying
+                // the exact value to copy (escaped) for the orchestrator.
+                $dnsCopyButton = static function (string $value): string {
+                    return '<button type="button" class="button cast-domain-copy" data-cast-copy="' . esc_attr($value) . '">' . esc_html('Copy') . '</button>';
+                };
+                // A copyable value: the exact value in its own span (so the
+                // value stays a clean, selectable, copyable unit) with the
+                // copy control beside it.
+                $dnsCopyValue = static function (string $value) use ($dnsCopyButton): string {
+                    return '<span class="cast-domain-copy-value">' . esc_html($value) . '</span> ' . $dnsCopyButton($value);
+                };
                 ?>
                 <?php if ($dnsBlock !== null) : ?>
                     <div class="cast-domain-records cast-domain-dns-records cast-domain-dns-copy">
@@ -433,15 +522,50 @@ $primaryAction = $publish->primaryAction;
                             <?php endif; ?>
                             <?php if (isset($dnsBlock['status']) && $dnsBlock['status'] !== '') : ?>
                                 <dt><?php echo esc_html('Status'); ?></dt>
-                                <dd><?php echo esc_html($dnsBlock['status']); ?></dd>
+                                <dd><?php echo esc_html((string) $dnsBlock['status']); ?></dd>
                             <?php endif; ?>
                             <?php if (isset($dnsBlock['gateway_host']) && $dnsBlock['gateway_host'] !== null && $dnsBlock['gateway_host'] !== '') : ?>
                                 <dt><?php echo esc_html('Gateway'); ?></dt>
-                                <dd><?php echo esc_html($dnsBlock['gateway_host']); ?></dd>
+                                <dd><?php echo $dnsCopyValue((string) $dnsBlock['gateway_host']); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped inside ?>
                             <?php endif; ?>
                         </dl>
 
-                        <?php if ($dnsDelegation === null) : ?>
+                        <?php if ($dnsOnchain) : ?>
+                            <?php
+                            // On-chain managed: the domain is held on-chain and
+                            // its DNS records are set on-chain, not in a
+                            // Pinner-managed zone. Show only the server-
+                            // returned DNSLink/TLSA guidance (the delegation
+                            // bundle's records, when present, plus the per-record
+                            // checks below) and never claim Pinner manages the
+                            // DNS — that framing belongs to the delegated
+                            // managed / self-managed cases only.
+                            ?>
+                            <p class="cast-domain-dns-instruction"><?php echo esc_html('This domain is managed on-chain, so its DNS records are set on-chain, not by Pinner.'); ?></p>
+                            <p class="cast-domain-dns-instruction"><?php echo esc_html('Publish the DNSLink and TLSA records shown below on-chain, wherever you manage this domain\'s DNS.'); ?></p>
+                            <?php if ($dnsDelegation !== null && ($dnsParent !== [] || $dnsAuthoritative !== [])) : ?>
+                                <h4 class="cast-domain-dns-subheading"><?php echo esc_html('Records to publish on-chain'); ?></h4>
+                                <table class="cast-domain-dns-table">
+                                    <thead>
+                                        <tr><th><?php echo esc_html('Type'); ?></th><th><?php echo esc_html('Value'); ?></th></tr>
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach (array_merge($dnsParent, $dnsAuthoritative) as $dnsRecord) : ?>
+                                            <?php
+                                            $dnsValue = isset($dnsRecord['value']) ? (string) $dnsRecord['value'] : '';
+                                            $dnsType = isset($dnsRecord['type']) ? (string) $dnsRecord['type'] : '';
+                                            $dnsValues = $dnsType === 'NS' && str_contains($dnsValue, ',')
+                                                ? array_map('trim', explode(',', $dnsValue))
+                                                : [$dnsValue];
+                                            ?>
+                                            <?php foreach ($dnsValues as $dnsSingle) : ?>
+                                                <tr><td><?php echo esc_html($dnsType); ?></td><td><?php echo $dnsCopyValue($dnsSingle); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped inside ?></td></tr>
+                                            <?php endforeach; ?>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            <?php endif; ?>
+                        <?php elseif ($dnsDelegation === null) : ?>
                             <p class="cast-domain-dns-instruction">
                                 <?php echo esc_html('No delegation records are available for ' . $dnsName . '.'); ?>
                             </p>
@@ -463,7 +587,7 @@ $primaryAction = $publish->primaryAction;
                                         </thead>
                                         <tbody>
                                             <?php foreach ($dnsNameservers as $dnsNs) : ?>
-                                                <tr><td><?php echo esc_html($dnsName); ?></td><td><?php echo esc_html('NS'); ?></td><td><?php echo esc_html((string) $dnsNs); ?></td></tr>
+                                                <tr><td><?php echo esc_html($dnsName); ?></td><td><?php echo esc_html('NS'); ?></td><td><?php echo $dnsCopyValue((string) $dnsNs); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped inside ?></td></tr>
                                             <?php endforeach; ?>
                                         </tbody>
                                     </table>
@@ -521,7 +645,7 @@ $primaryAction = $publish->primaryAction;
                                                 : [$dnsValue];
                                             ?>
                                             <?php foreach ($dnsValues as $dnsSingle) : ?>
-                                                <tr><td><?php echo esc_html($dnsType); ?></td><td><?php echo esc_html($dnsSingle); ?></td></tr>
+                                                <tr><td><?php echo esc_html($dnsType); ?></td><td><?php echo $dnsCopyValue($dnsSingle); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped inside ?></td></tr>
                                             <?php endforeach; ?>
                                         <?php endforeach; ?>
                                     </tbody>
@@ -544,7 +668,7 @@ $primaryAction = $publish->primaryAction;
                                                 : [$dnsValue];
                                             ?>
                                             <?php foreach ($dnsValues as $dnsSingle) : ?>
-                                                <tr><td><?php echo esc_html($dnsType); ?></td><td><?php echo esc_html($dnsSingle); ?></td></tr>
+                                                <tr><td><?php echo esc_html($dnsType); ?></td><td><?php echo $dnsCopyValue($dnsSingle); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped inside ?></td></tr>
                                             <?php endforeach; ?>
                                         <?php endforeach; ?>
                                     </tbody>
@@ -562,7 +686,7 @@ $primaryAction = $publish->primaryAction;
                                 <h4 class="cast-domain-dns-subheading"><?php echo esc_html('Nameservers'); ?></h4>
                                 <ul class="cast-domain-nameservers">
                                     <?php foreach ($dnsNameservers as $dnsNs) : ?>
-                                        <li><?php echo esc_html((string) $dnsNs); ?></li>
+                                        <li><?php echo $dnsCopyValue((string) $dnsNs); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped inside ?></li>
                                     <?php endforeach; ?>
                                 </ul>
                             <?php endif; ?>
@@ -575,7 +699,7 @@ $primaryAction = $publish->primaryAction;
                             <?php endif; ?>
                         <?php endif; ?>
 
-                        <?php if (!$dnsHosted) : ?>
+                        <?php if (!$dnsOnchain && !$dnsHosted) : ?>
                             <?php
                             // Self-managed DNS: the records the operator must
                             // add are shown above (the delegation/validation
@@ -601,7 +725,7 @@ $primaryAction = $publish->primaryAction;
                                     <?php endif; ?>
                                     <?php if ($dnsCheckExpected !== '') : ?>
                                         <dt><?php echo esc_html('Publish this record:'); ?></dt>
-                                        <dd><?php echo esc_html($dnsCheckExpected); ?></dd>
+                                        <dd><?php echo $dnsCopyValue($dnsCheckExpected); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped inside ?></dd>
                                     <?php endif; ?>
                                     <?php if ($dnsCheckFound !== '') : ?>
                                         <dt><?php echo esc_html('Found instead:'); ?></dt>
@@ -614,38 +738,95 @@ $primaryAction = $publish->primaryAction;
                 <?php endif; ?>
             <?php endif; ?>
 
-            <?php
-            $domainActions = [
-                'bind' => $domainPanel->canBind,
-                'verify' => $domainPanel->canVerify,
-                'validate' => $domainPanel->canValidate,
-                'delete' => $domainPanel->canDelete,
-                'dns' => $domainPanel->canReadDns,
-                'ssl' => $domainPanel->canReadSsl,
-            ];
-            ?>
-            <?php if (in_array(true, $domainActions, true)) : ?>
-                <h3 class="cast-domain-section"><?php echo esc_html('Actions'); ?></h3>
-                <ul class="cast-domain-actions" aria-label="<?php echo esc_attr('Available domain actions'); ?>">
-                    <?php if ($domainActions['bind']) : ?>
-                        <li class="cast-domain-action cast-domain-action-bind" data-domain-action="bind"><?php echo esc_html('Bind a domain'); ?></li>
+            <button type="button" class="button cast-domain-setup-check"
+                    data-domain-action="validate"
+                    data-domain-id="<?php echo esc_attr($domainCardMatch ? (string) ($domainPanel->dnsDomain['id'] ?? '') : ''); ?>">
+                <?php echo esc_html('I made the changes — check again'); ?>
+            </button>
+
+            <h3 class="cast-domain-section"><?php echo esc_html('Security certificate'); ?></h3>
+            <p class="cast-publish-readiness-level cast-domain-ssl-label cast-publish-level-<?php echo esc_attr($domainPanel?->sslLevel ?? 'note'); ?>">
+                <?php echo esc_html($domainPanel?->sslLabel ?? 'The certificate status will appear here once your site is published.'); ?>
+            </p>
+            <?php if ($domainCardMatch && $domainPanel->ssl !== null && $domainPanel->ssl !== []) : ?>
+                <dl class="cast-domain-records cast-domain-ssl-records">
+                    <?php if (isset($domainPanel->ssl['status']) && $domainPanel->ssl['status'] !== null && $domainPanel->ssl['status'] !== '') : ?>
+                        <dt><?php echo esc_html('Status'); ?></dt>
+                        <dd><?php echo esc_html((string) $domainPanel->ssl['status']); ?></dd>
                     <?php endif; ?>
-                    <?php if ($domainActions['verify']) : ?>
-                        <li class="cast-domain-action cast-domain-action-verify" data-domain-action="verify"><?php echo esc_html('Verify DNS delegation'); ?></li>
+                    <?php if (isset($domainPanel->ssl['issued_at']) && $domainPanel->ssl['issued_at'] !== null && $domainPanel->ssl['issued_at'] !== '') : ?>
+                        <dt><?php echo esc_html('Issued'); ?></dt>
+                        <dd><?php echo esc_html((string) $domainPanel->ssl['issued_at']); ?></dd>
                     <?php endif; ?>
-                    <?php if ($domainActions['validate']) : ?>
-                        <li class="cast-domain-action cast-domain-action-validate" data-domain-action="validate"><?php echo esc_html('Validate DNS'); ?></li>
+                </dl>
+            <?php endif; ?>
+        </section>
+    <?php endif; ?>
+
+    <?php // 4 — WHEN TO PUBLISH ?>
+    <section class="card cast-publish-when-card" aria-labelledby="cast-publish-when-heading">
+        <h2 id="cast-publish-when-heading"><?php echo esc_html('When to publish'); ?></h2>
+
+        <?php if ($publish->canChangeMode) : ?>
+            <div class="cast-publish-mode-options" role="radiogroup" aria-labelledby="cast-publish-mode-label">
+                <span class="cast-publish-mode-label" id="cast-publish-mode-label"><?php echo esc_html('Publish trigger'); ?></span>
+                <?php foreach ($modeOptions as $modeOption) : ?>
+                    <?php $modeSelected = $publish->mode === $modeOption['value']; ?>
+                    <label class="cast-publish-mode-option">
+                        <input type="radio"
+                               name="cast-publish-mode"
+                               value="<?php echo esc_attr($modeOption['value']); ?>"
+                               data-cast-publish-action="mode"
+                               data-cast-publish-value="<?php echo esc_attr($modeOption['value']); ?>"
+                               aria-describedby="cast-publish-mode-help"
+                               <?php echo $modeSelected ? 'checked disabled' : ''; ?>>
+                        <?php echo esc_html($modeOption['label']); ?>
+                    </label>
+                    <span class="cast-publish-mode-help-sr" id="cast-publish-mode-help-<?php echo esc_attr($modeOption['value']); ?>"><?php echo esc_html($modeHelp[$modeOption['value']]); ?></span>
+                <?php endforeach; ?>
+            </div>
+            <p class="cast-publish-mode-help" id="cast-publish-mode-help" aria-live="polite">
+                <?php echo esc_html($activeModeHelp); ?>
+            </p>
+        <?php else : ?>
+            <p class="cast-publish-mode-locked">
+                <?php echo esc_html($modeLockedMessage); ?>
+            </p>
+        <?php endif; ?>
+    </section>
+
+    <?php // 5 — YOUR PINNER ACCOUNT ?>
+    <?php if ($publish->connection instanceof \LumeWeb\Cast\Admin\ConnectionView) : ?>
+        <section class="card cast-connection-card" aria-labelledby="cast-connection-heading">
+            <h2 id="cast-connection-heading"><?php echo esc_html('Your Pinner account'); ?></h2>
+
+            <?php if ($publish->connection->isResolved()) : ?>
+                <p class="cast-connection-state cast-connection-state-resolved"><?php echo esc_html('Connected'); ?></p>
+                <dl class="cast-connection-details">
+                    <?php if ($publish->connection->accountName() !== null && $publish->connection->accountName() !== '') : ?>
+                        <dt><?php echo esc_html('Account'); ?></dt>
+                        <dd><?php echo esc_html($publish->connection->accountName()); ?></dd>
                     <?php endif; ?>
-                    <?php if ($domainActions['delete']) : ?>
-                        <li class="cast-domain-action cast-domain-action-delete" data-domain-action="delete"><?php echo esc_html('Delete the domain'); ?></li>
+                    <?php if ($publish->connection->accountEmail() !== null && $publish->connection->accountEmail() !== '') : ?>
+                        <dt><?php echo esc_html('Email'); ?></dt>
+                        <dd><?php echo esc_html($publish->connection->accountEmail()); ?></dd>
                     <?php endif; ?>
-                    <?php if ($domainActions['dns']) : ?>
-                        <li class="cast-domain-action cast-domain-action-dns" data-domain-action="dns"><?php echo esc_html('View DNS delegation records'); ?></li>
+                    <?php if ($publish->connection->workspaceLabel() !== null && $publish->connection->workspaceLabel() !== '') : ?>
+                        <dt><?php echo esc_html('Workspace'); ?></dt>
+                        <dd><?php echo esc_html($publish->connection->workspaceLabel()); ?></dd>
                     <?php endif; ?>
-                    <?php if ($domainActions['ssl']) : ?>
-                        <li class="cast-domain-action cast-domain-action-ssl" data-domain-action="ssl"><?php echo esc_html('View SSL status'); ?></li>
+                    <?php if ($publish->connection->workspaceDomain() !== null && $publish->connection->workspaceDomain() !== '') : ?>
+                        <dt><?php echo esc_html('Domain'); ?></dt>
+                        <dd><?php echo esc_html($publish->connection->workspaceDomain()); ?></dd>
                     <?php endif; ?>
-                </ul>
+                </dl>
+            <?php else : ?>
+                <p class="cast-connection-state cast-connection-state-<?php echo esc_attr($publish->connection->state()); ?>">
+                    <?php echo esc_html('Connection unavailable'); ?>
+                </p>
+                <?php if ($publish->connection->error() !== null) : ?>
+                    <p class="cast-connection-error notice notice-error"><?php echo esc_html($publish->connection->error()); ?></p>
+                <?php endif; ?>
             <?php endif; ?>
         </section>
     <?php endif; ?>

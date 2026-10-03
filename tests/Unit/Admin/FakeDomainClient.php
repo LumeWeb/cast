@@ -85,6 +85,15 @@ final class FakeDomainClient implements DomainClient
         $this->record('dnsRequirements', [$websiteId, $domainId]);
         $this->maybeThrow();
 
+        // Echo the requested domain back from the scripted list when it is
+        // bound there, so a test can distinguish which domain id the caller
+        // asked for; an unknown id keeps the fixed default bundle.
+        foreach ($this->domains as $domain) {
+            if ($domain->id === $domainId) {
+                return $domain;
+            }
+        }
+
         return new Domain($domainId, 'name/', 'hns', true, 'waiting_delegation', 'gw.example.com');
     }
 

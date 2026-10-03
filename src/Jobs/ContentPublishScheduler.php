@@ -9,6 +9,8 @@ use LumeWeb\Cast\Export\RunRepository;
 use LumeWeb\Cast\Export\RunSettings;
 use LumeWeb\Cast\Export\RunStatus;
 use LumeWeb\Cast\Export\WorkItemRepository;
+use LumeWeb\Cast\Publish\PublishDestinationLifecycle;
+use LumeWeb\Cast\Publish\PublishDestinationStore;
 
 /**
  * Debounce/squash scheduling for background export runs.
@@ -45,6 +47,13 @@ final class ContentPublishScheduler
         private WorkItemRepository $workItems,
         private int $quietSeconds = self::DEFAULT_QUIET_SECONDS,
         private int $followUpDelaySeconds = self::DEFAULT_FOLLOW_UP_DELAY_SECONDS,
+        // The first-publish destination setup store: when a fresh run is
+        // constructed the CONFIRMED destination (a draft never) is
+        // snapshotted into the run's settings, so the immutable per-run
+        // snapshot carries the operator's explicit address choice and an
+        // implicit hostname can never define it. Optional: without it fresh
+        // runs simply carry no destination (unchanged behaviour).
+        private ?PublishDestinationStore $destinationStore = null,
     ) {
     }
 
@@ -286,7 +295,7 @@ final class ContentPublishScheduler
             $this->repository->delete($run->runId);
         }
 
-        $pending = ExportRun::create($this->nextRunId($now), new RunSettings(), at: $now);
+        $pending = ExportRun::create($this->nextRunId($now), $this->snapshotSettings(), at: $now);
         $pending->markDirty(at: $now);
         if ($explicit) {
             $pending->markExplicitStart(at: $now);
@@ -303,6 +312,23 @@ final class ContentPublishScheduler
         // run, publishExisting replay, ticks and status reads) never reaches
         // this branch and never clears.
         $this->workItems->clear();
+    }
+
+    /**
+     * The settings snapshot a FRESH run starts with: the default snapshot
+     * plus — when a destination store is wired and holds a confirmed (or
+     * already created/attached) choice — that destination. A draft is not a
+     * confirmed choice and is never snapshotted; an absent store leaves the
+     * snapshot exactly as before.
+     */
+    private function snapshotSettings(): RunSettings
+    {
+        $state = $this->destinationStore?->read();
+        if ($state !== null && $state->lifecycle !== PublishDestinationLifecycle::Draft) {
+            return new RunSettings(destination: $state->destination);
+        }
+
+        return new RunSettings();
     }
 
     private function scheduleDebounce(int $now): PublishScheduleState

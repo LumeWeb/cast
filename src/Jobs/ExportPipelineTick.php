@@ -9,6 +9,7 @@ use LumeWeb\Cast\Export\PipelineContext;
 use LumeWeb\Cast\Export\PipelineStage;
 use LumeWeb\Cast\Export\PipelineStageKey;
 use LumeWeb\Cast\Export\RunSettings;
+use LumeWeb\Cast\Export\RunStage;
 use LumeWeb\Cast\Export\RunStatus;
 use LumeWeb\Cast\Export\StageResult;
 
@@ -25,10 +26,11 @@ use LumeWeb\Cast\Export\StageResult;
  *    never sleeps);
  *  - applies the returned cursor, progress and warnings to the aggregate and
  *    persists it through the injected {@see PipelineContext} repository;
- *  - handles pause/cancel/failure explicitly: a paused, terminal or superseded
- *    run never advances; a stage failure surfaces as {@see TickResult::fail()}
- *    (retry bookkeeping stays in {@see ExportTickRunner}); a stage cancel ends
- *    the run as Cancelled.
+ *  - handles pause/cancel/park/failure explicitly: a paused, terminal or
+ *    superseded run never advances; a parked stage (the custom-domain
+ *    awaiting-DNS boundary) pauses the run without a failure; a stage failure
+ *    surfaces as {@see TickResult::fail()} (retry bookkeeping stays in
+ *    {@see ExportTickRunner}); a stage cancel ends the run as Cancelled.
  *
  * A run reaches a terminal status (Completed / CompletedWithWarnings) only
  * after the pack boundary, the wrapup boundary and the publish boundary have
@@ -72,6 +74,18 @@ final class ExportPipelineTick implements BoundTick
 
         if ($result->cancelled) {
             $run->cancel(at: $now);
+            $this->context->runs->save($run);
+
+            return TickResult::more();
+        }
+
+        if ($result->parked) {
+            // A deliberate park (the custom-domain awaiting-DNS boundary): the
+            // stage already persisted its explicit boundary state, so pause the
+            // run — no failure, no retry bookkeeping. The preserved identity
+            // and intact artifact resume through the operator-driven path
+            // (DNS verification + publish-existing) without re-uploading.
+            $run->pause(at: $now);
             $this->context->runs->save($run);
 
             return TickResult::more();
@@ -209,6 +223,24 @@ final class ExportPipelineTick implements BoundTick
     {
         $coarse = $key->coarseRunStage();
         if ($run->stage === $coarse) {
+            return;
+        }
+
+        // A publish-only replay (resume 'publish|') positions a FRESH run —
+        // whose coarse stage is still Idle — directly at the publish
+        // boundary. The one-step-forward rule governs in-flight runs and
+        // would reject that legal jump, so advance step-by-step: the
+        // persisted stage stays monotonic, and a backward move still throws
+        // exactly as before.
+        if ($coarse->order() > $run->stage->order()) {
+            $byOrder = [];
+            foreach (RunStage::cases() as $candidate) {
+                $byOrder[$candidate->order()] = $candidate;
+            }
+            for ($order = $run->stage->order() + 1; $order <= $coarse->order(); $order++) {
+                $run->advanceStage($byOrder[$order], at: $now);
+            }
+
             return;
         }
 

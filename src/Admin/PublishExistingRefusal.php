@@ -28,4 +28,9 @@ enum PublishExistingRefusal: string
 
     /** No website/IPNS identity yet: a re-publish cannot target anything. */
     case IdentityMissing = 'identity_missing';
+
+    /** The run is parked at the explicit custom-domain awaiting-DNS boundary
+     * and the domain's DNS has not verified as connected yet: the resume is
+     * refused (side-effect free) so the run stays parked until it does. */
+    case DomainDnsNotVerified = 'domain_dns_not_verified';
 }
