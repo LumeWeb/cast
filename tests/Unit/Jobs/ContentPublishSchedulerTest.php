@@ -409,8 +409,51 @@ final class ContentPublishSchedulerTest extends TestCase
         $outcome = $workItems->insertCanonical($run2, $root, 1);
         self::assertTrue($outcome->inserted(), 'run 2 must re-discover and re-queue the root page');
         self::assertSame(1, $workItems->countByStatus($run2, WorkItemStatus::Queued));
-        // Run 1's terminal rows are another run's slice: never touched.
-        self::assertSame(1, $workItems->countByStatus('run-1', WorkItemStatus::Rewritten));
+        // Run 1 is terminal: its stale queue rows are purged when run 2 is
+        // persisted, so completed-run rows never linger in the shared queue.
+        self::assertSame(0, $workItems->countByStatus('run-1', WorkItemStatus::Rewritten));
+    }
+
+    public function testNewRunCreationPurgesTerminalAndSupersededPriorRunsQueueRows(): void
+    {
+        // Queue rows are run-scoped but survived their runs: when a new run is
+        // persisted, the queue rows of prior terminal and superseded runs must
+        // be purged, while a live (nonterminal, not superseded) run keeps its
+        // rows and the new run starts from an empty slice.
+        $workItems = new InMemoryWorkItemRepository();
+        $service = $this->makeService(workItems: $workItems);
+        $root = (new WorkItemFactory())->fromString('https://example.com/');
+
+        $done = $this->makeRun('run-terminal', 800);
+        $done->start(at: 810);
+        $done->complete(at: 900);
+        $this->repository->save($done);
+
+        $overtaken = $this->makeRun('run-superseded', 820);
+        $overtaken->start(at: 830);
+        $overtaken->supersede(at: 860);
+        $this->repository->save($overtaken);
+
+        $live = $this->makeRun('run-live', 840);
+        $live->start(at: 850);
+        $this->repository->save($live);
+
+        foreach (['run-terminal', 'run-superseded', 'run-live'] as $priorId) {
+            self::assertTrue($workItems->insertCanonical($priorId, $root)->inserted());
+        }
+        $workItems->transition('run-terminal', $root->urlHash(), WorkItemStatus::Done);
+        $workItems->transition('run-terminal', $root->urlHash(), WorkItemStatus::Rewritten);
+
+        $service->onContentPublished(at: 1000);
+
+        $next = $this->repository->latest();
+        self::assertNotNull($next);
+        $freshId = $next->runId;
+        self::assertNotSame('run-terminal', $freshId);
+        self::assertSame(0, $workItems->countByStatus('run-terminal', WorkItemStatus::Rewritten), 'a terminal prior run loses its queue rows');
+        self::assertSame(0, $workItems->countByStatus('run-superseded', WorkItemStatus::Queued), 'a superseded prior run loses its queue rows');
+        self::assertSame(1, $workItems->countByStatus('run-live', WorkItemStatus::Queued), 'a live nonterminal run keeps its queue rows');
+        self::assertSame(0, $workItems->pendingCount($freshId), 'the new run starts from an empty queue');
     }
 
     public function testManualDriftRunIsNotExplicitSoItWaitsForTheUser(): void

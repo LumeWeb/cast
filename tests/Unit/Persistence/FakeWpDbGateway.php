@@ -39,11 +39,12 @@ final class FakeWpDbGateway implements WpDbGateway
         $this->prepared[] = [$sql, array_values($params)];
 
         if (str_contains($sql, 'DELETE FROM')) {
-            // The repository's clear(runId) empties one run's slice of the
-            // shared queue; wpdb returns the number of deleted rows.
+            // clear(runId) is a single-id DELETE; purgeTerminalRuns() is the
+            // same scoped statement over a list of run ids (IN clause). wpdb
+            // returns the number of deleted rows.
             $deleted = 0;
             foreach ($this->rows as $index => $row) {
-                if ($row['run_id'] === $params[0]) {
+                if (in_array($row['run_id'], $params, true)) {
                     unset($this->rows[$index]);
                     ++$deleted;
                 }

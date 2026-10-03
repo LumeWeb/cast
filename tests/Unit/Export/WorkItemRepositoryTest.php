@@ -362,6 +362,37 @@ final class WorkItemRepositoryTest extends TestCase
         );
     }
 
+    public function testPurgeTerminalRunsRemovesOnlyTheListedRunsRows(): void
+    {
+        // Completed/superseded runs accumulate terminal rows in the shared
+        // queue; purging must drop exactly the listed runs' rows and leave
+        // every other run's slice (including a fresh run's) intact.
+        $item = $this->item('https://example.com/');
+        $this->repository->insertCanonical('run-1', $item);
+        $this->repository->transition('run-1', $item->urlHash(), WorkItemStatus::Done);
+        $this->repository->transition('run-1', $item->urlHash(), WorkItemStatus::Rewritten);
+        $this->repository->insertCanonical('run-2', $item);
+        $this->repository->transition('run-2', $item->urlHash(), WorkItemStatus::Failed);
+        $this->repository->insertCanonical('run-3', $item);
+
+        $this->repository->purgeTerminalRuns(['run-1', 'run-2']);
+
+        self::assertSame(0, $this->repository->countByStatus('run-1', WorkItemStatus::Rewritten), 'a purged run loses its terminal rows');
+        self::assertSame(0, $this->repository->countByStatus('run-2', WorkItemStatus::Failed), 'a purged run loses its rows');
+        self::assertSame(1, $this->repository->countByStatus('run-3', WorkItemStatus::Queued), 'an unlisted run keeps its rows');
+        self::assertSame(0, $this->repository->pendingCount('run-1'));
+    }
+
+    public function testPurgeTerminalRunsWithAnEmptyListChangesNothing(): void
+    {
+        $item = $this->item('https://example.com/');
+        $this->repository->insertCanonical(self::RUN, $item);
+
+        $this->repository->purgeTerminalRuns([]);
+
+        self::assertSame(1, $this->repository->countByStatus(self::RUN, WorkItemStatus::Queued), 'an empty purge is a no-op');
+    }
+
     public function testOnlyOneWorkerGetsAClaim(): void
     {
         $item = $this->item('https://example.com/');

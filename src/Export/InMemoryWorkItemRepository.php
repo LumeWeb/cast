@@ -186,6 +186,15 @@ final class InMemoryWorkItemRepository implements WorkItemRepository
         $this->rows[$runId] = [];
     }
 
+    public function purgeTerminalRuns(array $runIds): void
+    {
+        // Only the listed runs' rows are removed; every other run's slice is
+        // left exactly as it is, and an empty list changes nothing.
+        foreach ($runIds as $runId) {
+            $this->rows[$runId] = [];
+        }
+    }
+
     /**
      * In-flight rows are claimable only on an expired lease; a never-leased
      * row (lease expiry 0) was transitioned without a claim and stays

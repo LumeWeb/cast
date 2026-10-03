@@ -105,4 +105,17 @@ interface WorkItemRepository
      * status read.
      */
     public function clear(string $runId): void;
+
+    /**
+     * Purge every queue row of the given runs, in one operation. Called
+     * exactly when a brand-new run is persisted, with the ids of the prior
+     * terminal/superseded runs, so completed runs' rows stop accumulating in
+     * the shared queue. Unlike clear(), this is a batch over run ids chosen
+     * by the caller: only the listed runs' rows are removed, and no other run
+     * — in particular the fresh run and any live nonterminal run — is ever
+     * touched. An empty list is a no-op.
+     *
+     * @param list<string> $runIds Run ids whose rows are purged.
+     */
+    public function purgeTerminalRuns(array $runIds): void;
 }

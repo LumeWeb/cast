@@ -486,6 +486,45 @@ final class SqlWorkItemRepositoryTest extends TestCase
         );
     }
 
+    public function testPurgeTerminalRunsDeletesExactlyTheListedRunsInOneScopedStatement(): void
+    {
+        // Completed/superseded runs accumulate terminal rows in the shared
+        // table; the prune must be ONE scoped DELETE whose WHERE lists exactly
+        // the purged run ids and nothing else.
+        $item = $this->item('https://example.com/');
+        $this->repository->insertCanonical('run-1', $item);
+        $this->repository->transition('run-1', $item->urlHash(), WorkItemStatus::Rewritten);
+        $this->repository->insertCanonical('run-2', $item);
+        $this->repository->insertCanonical('run-3', $item);
+
+        $this->repository->purgeTerminalRuns(['run-1', 'run-2']);
+
+        $delete = null;
+        foreach (array_reverse($this->gateway->prepared) as $statement) {
+            if (str_contains($statement[0], 'DELETE FROM')) {
+                $delete = $statement;
+
+                break;
+            }
+        }
+        self::assertNotNull($delete, 'the prune dispatches a DELETE');
+        self::assertSame("DELETE FROM cast_export_items WHERE run_id IN (%s, %s)", $delete[0]);
+        self::assertSame(['run-1', 'run-2'], $delete[1], 'the WHERE lists exactly the purged run ids');
+
+        self::assertSame(0, $this->repository->countByStatus('run-1', WorkItemStatus::Rewritten), 'a purged run loses its terminal rows');
+        self::assertSame(0, $this->repository->countByStatus('run-2', WorkItemStatus::Queued), 'a purged run loses its rows');
+        self::assertSame(1, $this->repository->countByStatus('run-3', WorkItemStatus::Queued), 'an unlisted run keeps its rows');
+    }
+
+    public function testPurgeTerminalRunsWithAnEmptyListIssuesNoStatement(): void
+    {
+        $before = count($this->gateway->prepared);
+
+        $this->repository->purgeTerminalRuns([]);
+
+        self::assertSame($before, count($this->gateway->prepared), 'nothing to prune, nothing dispatched');
+    }
+
     public function testOnlyOneWorkerGetsAClaim(): void
     {
         $item = $this->item('https://example.com/');

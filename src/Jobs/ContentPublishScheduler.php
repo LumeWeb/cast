@@ -291,6 +291,18 @@ final class ContentPublishScheduler
             return;
         }
 
+        // Collect the ids of prior runs that will never be ticked again
+        // (terminal, or superseded on the way to cancellation) BEFORE the
+        // latest record is deleted, so the deleted run's queue rows are
+        // covered too. Live (nonterminal, not superseded) runs and the fresh
+        // run are never in this list.
+        $staleRunIds = [];
+        foreach ($this->repository->list() as $prior) {
+            if ($prior->isTerminal() || $prior->superseded) {
+                $staleRunIds[] = $prior->runId;
+            }
+        }
+
         if ($run !== null) {
             $this->repository->delete($run->runId);
         }
@@ -308,6 +320,13 @@ final class ContentPublishScheduler
         // already carries, so the new run must start from a clean queue. The
         // clear is scoped to the new run's slice.
         $this->workItems->clear($pending->runId);
+
+        // Queue rows are run-scoped but persisted across completed runs: purge
+        // the prior terminal/superseded runs' rows now that the new run is
+        // persisted, so finished runs stop accumulating rows in the shared
+        // queue. The purge only touches the listed run ids — never the fresh
+        // run's slice and never a live nonterminal run.
+        $this->workItems->purgeTerminalRuns($staleRunIds);
     }
 
     /**

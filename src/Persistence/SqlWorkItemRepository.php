@@ -308,6 +308,28 @@ final class SqlWorkItemRepository implements WorkItemRepository
         );
     }
 
+    public function purgeTerminalRuns(array $runIds): void
+    {
+        $runIds = array_values(array_unique(array_filter(
+            $runIds,
+            static fn (string $id): bool => $id !== '',
+        )));
+
+        if ($runIds === []) {
+            // Nothing to prune: no statement is dispatched at all.
+            return;
+        }
+
+        // One scoped DELETE over exactly the listed run ids; rows of any run
+        // not in the list (the fresh run, live nonterminal runs) are left
+        // untouched. Run ids are trusted internal identifiers, bound with %s.
+        $placeholders = implode(', ', array_fill(0, count($runIds), '%s'));
+        $this->db->query(
+            $this->sql("DELETE FROM {$this->table} WHERE run_id IN ({$placeholders})"),
+            $runIds,
+        );
+    }
+
     private function rowExists(string $runId, string $urlHash): bool
     {
         $exists = $this->db->getVar(
