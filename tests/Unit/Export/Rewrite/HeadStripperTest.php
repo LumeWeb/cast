@@ -37,6 +37,7 @@ final class HeadStripperTest extends TestCase
             . '<link rel="https://api.w.org/" href="https://example.com/wp-json/" />'
             . '<link rel="alternate" type="application/json+oembed" href="https://example.com/wp-json/oembed/1.0/embed" />'
             . '<link rel="alternate" type="text/xml+oembed" href="https://example.com/wp-json/oembed/1.0/embed" />'
+            . '<link rel="alternate" type="application/xml+oembed" href="https://example.com/wp-json/oembed/1.0/embed" />'
             . '<meta name="generator" content="WordPress 6.7.1" />'
             . '<script type="text/javascript" src="https://example.com/wp-includes/js/wp-emoji-release.min.js?ver=6.7.1"></script>'
             . '<script src="https://example.com/wp-includes/js/wp-embed.min.js"></script>'

@@ -118,7 +118,11 @@ final class HeadStripper
         }
 
         // oEmbed discovery alternates.
-        if ($type === 'application/json+oembed' || $type === 'text/xml+oembed') {
+        if (
+            $type === 'application/json+oembed'
+            || $type === 'text/xml+oembed'
+            || $type === 'application/xml+oembed'
+        ) {
             return true;
         }
 
