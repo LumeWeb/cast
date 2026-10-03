@@ -11,6 +11,7 @@ use LumeWeb\Cast\Export\RunSettings;
 use LumeWeb\Cast\Export\RunStage;
 use LumeWeb\Cast\Export\RunStatus;
 use LumeWeb\Cast\Jobs\ContentPublishScheduler;
+use LumeWeb\Cast\Jobs\CaptureWorkerScheduler;
 use LumeWeb\Cast\Jobs\PublishIdentity;
 use LumeWeb\Cast\Jobs\TickConfig;
 use LumeWeb\Cast\Jobs\WordPressActionScheduler;
@@ -819,6 +820,70 @@ final class CastPluginProbeWiringTest extends TestCase
      * WordPressActionSchedulerGateway → as_* API) rearms end to end into the
      * Action Scheduler store — never the vanilla WP-Cron single-event engine.
      */
+    /**
+     * Boot acceptance for the capture-worker fanout composition: after a real
+     * CastPlugin boot the JobsHookSubscriber registers the
+     * cast/export/capture-worker action, and a tick that sits at capture arms
+     * the bounded worker slots through the CaptureWorkerScheduler into the
+     * Action Scheduler store (one (hook, args) event per slot, next to the
+     * unchanged single auto-tick re-arm).
+     */
+    public function testBootedCaptureTickArmsBoundedCaptureWorkerEventsAndRegistersTheWorkerHook(): void
+    {
+        // A small sitemap so discovery drains exactly like the sibling
+        // acceptance tests, and a real page body for the one URL it enqueues.
+        $GLOBALS['lumeweb_cast_wp_remote_responses']['https://blog.example.test/wp-sitemap.xml'] = [
+            'headers' => ['content-type' => 'application/xml; charset=UTF-8'],
+            'body' => '<?xml version="1.0" encoding="UTF-8"?>'
+                . '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                . '<url><loc>https://blog.example.test/sitemap-page/</loc></url>'
+                . '</urlset>',
+            'response' => ['code' => 200, 'message' => 'OK'],
+            'cookies' => [],
+            'filename' => null,
+        ];
+        $GLOBALS['lumeweb_cast_wp_remote_responses']['https://blog.example.test/sitemap-page/'] = [
+            'headers' => ['content-type' => 'text/html; charset=UTF-8'],
+            'body' => $this->htmlBody(),
+            'response' => ['code' => 200, 'message' => 'OK'],
+            'cookies' => [],
+            'filename' => null,
+        ];
+
+        $this->bootSingleUnitPerTick();
+
+        $workerHookRegistered = false;
+        foreach ($GLOBALS['lumeweb_cast_hooks'] as $entry) {
+            if (($entry[0] ?? null) === 'action' && ($entry[1] ?? null) === CaptureWorkerScheduler::WORKER_HOOK) {
+                $workerHookRegistered = true;
+            }
+        }
+        self::assertTrue($workerHookRegistered, 'boot registers the capture-worker action');
+
+        // Ten ticks drain probe + setup + discovery to the capture boundary;
+        // the eleventh is the first capture tick.
+        for ($i = 0; $i < 11; ++$i) {
+            $this->runTick();
+        }
+
+        $run = $this->currentRun();
+        self::assertSame('capture|', $run->resumeCursor, 'the eleventh tick is a capture tick');
+
+        $workerEvents = [];
+        $autoTicks = [];
+        foreach ($GLOBALS['lumeweb_cast_actions']['actions'] as $event) {
+            if ($event['hook'] === CaptureWorkerScheduler::WORKER_HOOK) {
+                $workerEvents[] = $event;
+            } elseif ($event['hook'] === ContentPublishScheduler::AUTO_HOOK) {
+                $autoTicks[] = $event;
+            }
+        }
+        self::assertCount(1, $autoTicks, 'the normal auto-tick re-arm is unchanged');
+        self::assertCount(1, $workerEvents, 'the bounded default fanout arms one worker slot');
+        self::assertSame(['run-accept-1', 1], $workerEvents[0]['args']);
+        self::assertSame(WordPressActionScheduler::DEFAULT_GROUP, $workerEvents[0]['group']);
+    }
+
     public function testBootedTickRearmsExactlyOneNextAutoTick(): void
     {
         $this->bootSingleUnitPerTick();
