@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace LumeWeb\Cast\Jobs;
 
+use Closure;
 use ComposePress\Core\HookSubscriber;
 use ComposePress\Core\Hooks;
 use LumeWeb\Cast\Admin\PublishedContentProbe;
@@ -38,6 +39,15 @@ use LumeWeb\Cast\Admin\WordPressPublishedContentProbe;
  * its own periodic sweep. Without a retention scheduler nothing extra is
  * registered or armed, so the un-wired subscriber stays byte-for-byte the
  * pre-retention behaviour.
+ *
+ * When a capture-worker factory is wired, the {@see CaptureWorkerScheduler::WORKER_HOOK}
+ * action is registered and its handler runs exactly one bounded one-item
+ * capture worker for the (runId, slot) event identity, then coaxes the normal
+ * auto-tick so the coordinator keeps the run moving. The coax is a plain
+ * single-event schedule the tick scheduler dedupes, so it can never stack a
+ * tick storm. Without a factory nothing extra is registered and a stray
+ * worker event is ignored, so the un-wired subscriber stays the pre-worker
+ * behaviour.
  */
 final class JobsHookSubscriber implements HookSubscriber
 {
@@ -83,6 +93,10 @@ final class JobsHookSubscriber implements HookSubscriber
         // Defaults to the real WordPress probe; injectable so tests can
         // script the site's published content.
         private readonly PublishedContentProbe $contentProbe = new WordPressPublishedContentProbe(),
+        // Builds the one-item capture worker a worker event runs: receives
+        // the (runId, slot) event identity so the worker carries a
+        // slot-specific claim token. Null keeps the pre-worker subscriber.
+        private readonly ?Closure $captureWorkerFactory = null,
     ) {
     }
 
@@ -93,6 +107,9 @@ final class JobsHookSubscriber implements HookSubscriber
         $hooks->action(self::TRANSITION_HOOK, [$this, 'onPostTransition'], 10, 3);
         if ($this->retentionScheduler !== null) {
             $hooks->action(RetentionScheduler::RETENTION_HOOK, [$this, 'runRetention']);
+        }
+        if ($this->captureWorkerFactory !== null) {
+            $hooks->action(CaptureWorkerScheduler::WORKER_HOOK, [$this, 'runCaptureWorker'], 10, 2);
         }
     }
 
@@ -114,6 +131,50 @@ final class JobsHookSubscriber implements HookSubscriber
     public function runRetention(): void
     {
         $this->retentionRunner?->run();
+    }
+
+    /**
+     * The capture-worker handler: run exactly one bounded one-item worker for
+     * the (runId, slot) event identity, then coax the normal auto-tick so
+     * the coordinator records the capture progress and keeps advancing. The
+     * coax is a plain single-event schedule the tick scheduler dedupes on
+     * (hook, args), so an already-pending auto-tick is never stacked and a
+     * duplicate fanout cannot build a tick storm. Stale and malformed events
+     * (missing run id, slot below one, a run that moved on or went
+     * terminal) build no worker and coax nothing: the worker's own
+     * validation is the guard, and a skip coaxes no tick.
+     */
+    public function runCaptureWorker(?string $runId = null, int $slot = 0): void
+    {
+        if ($this->captureWorkerFactory === null) {
+            return;
+        }
+
+        if ($runId === null || $runId === '' || $slot < 1) {
+            return;
+        }
+
+        $worker = ($this->captureWorkerFactory)($runId, $slot);
+        if (!$worker instanceof CaptureWorker) {
+            return;
+        }
+
+        $outcome = $worker->work($runId);
+        if ($outcome->kind !== CaptureWorkerOutcomeKind::Captured) {
+            return;
+        }
+
+        try {
+            $this->tickScheduler->scheduleSingle(
+                ContentPublishScheduler::AUTO_HOOK,
+                $this->clock->now() + $this->rearmDelaySeconds,
+            );
+        } catch (SchedulingFailedException) {
+            // The action backend declined (Action Scheduler unavailable): the
+            // capture is already persisted in the work queue, and the next
+            // debounce or rearmed tick picks the run up. Nothing else to do
+            // here — the failure must not escape the worker callback.
+        }
     }
 
     /**

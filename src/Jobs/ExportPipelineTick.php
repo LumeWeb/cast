@@ -36,17 +36,29 @@ use LumeWeb\Cast\Export\StageResult;
  * after the pack boundary, the wrapup boundary and the publish boundary have
  * all finished, so an export is never declared complete while it is still
  * mid-pipeline.
+ *
+ * When a {@see CaptureWorkerScheduler} is wired, the tick also owns the
+ * bounded capture-worker fanout: a tick at capture arms the run's worker
+ * slots, and every path that leaves capture (stage boundary, terminal,
+ * paused, superseded, parked, cancelled) cancels the outstanding slots, so a
+ * stale worker event can never fire into a run that moved on. The worker
+ * slots only ever capture queue rows — the tick remains the only actor that
+ * records the CaptureSummary or advances capture to rewrite.
  */
 final class ExportPipelineTick implements BoundTick
 {
-    public function __construct(private readonly PipelineContext $context)
-    {
+    public function __construct(
+        private readonly PipelineContext $context,
+        private readonly ?CaptureWorkerScheduler $captureWorkers = null,
+    ) {
     }
 
     public function perform(ExportRun $run, int $now): TickResult
     {
         // Never advance a finished run or a deliberately paused one.
         if ($run->isTerminal() || $run->status === RunStatus::Paused) {
+            $this->clearCaptureWorkers($run);
+
             return TickResult::more();
         }
 
@@ -54,6 +66,7 @@ final class ExportPipelineTick implements BoundTick
         if ($run->superseded) {
             $run->cancel(at: $now);
             $this->context->runs->save($run);
+            $this->clearCaptureWorkers($run);
 
             return TickResult::more();
         }
@@ -65,6 +78,7 @@ final class ExportPipelineTick implements BoundTick
 
         [$stageKey, $cursor] = $this->currentPosition($run);
         $this->ensureCoarseStage($run, $stageKey, $now);
+        $this->syncCaptureWorkers($run, $stageKey, $now);
 
         $result = $this->stage($stageKey, $run->runId, $run->settings)->execute($cursor);
         $this->recordOutcome($run, $result, $now);
@@ -75,6 +89,7 @@ final class ExportPipelineTick implements BoundTick
         if ($result->cancelled) {
             $run->cancel(at: $now);
             $this->context->runs->save($run);
+            $this->clearCaptureWorkers($run);
 
             return TickResult::more();
         }
@@ -87,6 +102,7 @@ final class ExportPipelineTick implements BoundTick
             // (DNS verification + publish-existing) without re-uploading.
             $run->pause(at: $now);
             $this->context->runs->save($run);
+            $this->clearCaptureWorkers($run);
 
             return TickResult::more();
         }
@@ -98,6 +114,10 @@ final class ExportPipelineTick implements BoundTick
         }
 
         if ($result->done) {
+            // The run leaves the stage it just finished: any armed capture
+            // worker slots are cancelled here, the moment the boundary is
+            // crossed, so a stale event cannot fire into the next stage.
+            $this->clearCaptureWorkers($run);
             $next = $stageKey->next();
             if ($next === null) {
                 // Only now — after pack, wrapup and publish — is a terminal
@@ -123,6 +143,34 @@ final class ExportPipelineTick implements BoundTick
         $this->context->runs->save($run);
 
         return TickResult::more();
+    }
+
+    /**
+     * Arm the run's bounded capture-worker slots while it sits at capture;
+     * a run positioned anywhere else has none of its slots left armed. The
+     * arm is deduplicated by the scheduler (hook + args per slot), so a tick
+     * re-arming an already-armed run stores nothing.
+     */
+    private function syncCaptureWorkers(ExportRun $run, PipelineStageKey $key, int $now): void
+    {
+        if ($this->captureWorkers === null) {
+            return;
+        }
+
+        if ($key === PipelineStageKey::Capture) {
+            $this->captureWorkers->scheduleWorkers($run->runId, $now);
+
+            return;
+        }
+
+        $this->captureWorkers->clearWorkers($run->runId);
+    }
+
+    private function clearCaptureWorkers(ExportRun $run): void
+    {
+        if ($this->captureWorkers !== null) {
+            $this->captureWorkers->clearWorkers($run->runId);
+        }
     }
 
     /**

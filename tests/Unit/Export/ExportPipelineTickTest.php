@@ -4,10 +4,14 @@ declare(strict_types=1);
 
 namespace LumeWeb\Cast\Tests\Unit\Export;
 
+use LumeWeb\Cast\Export\CaptureResponse;
+use LumeWeb\Cast\Export\CaptureStage;
 use LumeWeb\Cast\Export\CaptureSummary;
 use LumeWeb\Cast\Export\DiscoverResult;
 use LumeWeb\Cast\Export\ExportRun;
 use LumeWeb\Cast\Export\InMemoryRunRepository;
+use LumeWeb\Cast\Export\InMemoryWorkItemRepository;
+use LumeWeb\Cast\Export\JailedDiskAssetSource;
 use LumeWeb\Cast\Export\Origin;
 use LumeWeb\Cast\Export\PackResult;
 use LumeWeb\Cast\Export\PackStatus;
@@ -25,8 +29,12 @@ use LumeWeb\Cast\Export\RunStatus;
 use LumeWeb\Cast\Export\SetupResult;
 use LumeWeb\Cast\Export\StageResult;
 use LumeWeb\Cast\Export\UnwiredStage;
+use LumeWeb\Cast\Export\UrlCanonicalizer;
 use LumeWeb\Cast\Export\WrapupResult;
+use LumeWeb\Cast\Export\WorkItemFactory;
+use LumeWeb\Cast\Jobs\CaptureWorkerScheduler;
 use LumeWeb\Cast\Jobs\ExportPipelineTick;
+use LumeWeb\Cast\Jobs\InMemoryScheduler;
 use LumeWeb\Cast\Jobs\ExportTickRunner;
 use LumeWeb\Cast\Jobs\FixedClock;
 use LumeWeb\Cast\Jobs\InMemoryIdentityGateway;
@@ -45,6 +53,10 @@ final class ExportPipelineTickTest extends TestCase
 {
     private InMemoryRunRepository $repository;
 
+    private string $workDir;
+
+    private string $jailRoot;
+
     /**
      * A completed publish boundary result used across the publish hydrate/
      * mirror tests.
@@ -57,6 +69,16 @@ final class ExportPipelineTickTest extends TestCase
     protected function setUp(): void
     {
         $this->repository = new InMemoryRunRepository();
+        $this->workDir = sys_get_temp_dir() . '/cast-tick-' . bin2hex(random_bytes(6));
+        $this->jailRoot = sys_get_temp_dir() . '/cast-tick-jail-' . bin2hex(random_bytes(6));
+        mkdir($this->workDir, 0777, true);
+        mkdir($this->jailRoot, 0777, true);
+    }
+
+    protected function tearDown(): void
+    {
+        $this->removeTree($this->workDir);
+        $this->removeTree($this->jailRoot);
     }
 
     /**
@@ -65,18 +87,23 @@ final class ExportPipelineTickTest extends TestCase
      * fails loudly instead of silently spinning.
      *
      * @param array<string, PipelineStage> $overrides
-     * @param PipelineState|null           $state    the shared PipelineState the
-     *                                               orchestrator hydrates/mirrors;
-     *                                               defaults to a fresh one
+     * @param PipelineState|null           $state          the shared PipelineState
+     *                                                     the orchestrator hydrates/
+     *                                                     mirrors; defaults to a
+     *                                                     fresh one
+     * @param CaptureWorkerScheduler|null  $captureWorkers bounded capture-worker
+     *                                                     fanout for capture ticks;
+     *                                                     null keeps the
+     *                                                     pre-worker composition
      */
-    private function pipeline(array $overrides = [], ?PipelineState $state = null): ExportPipelineTick
+    private function pipeline(array $overrides = [], ?PipelineState $state = null, ?CaptureWorkerScheduler $captureWorkers = null): ExportPipelineTick
     {
         $stages = [];
         foreach (PipelineStageKey::cases() as $key) {
             $stages[$key->value] = $overrides[$key->value] ?? new UnwiredStage($key);
         }
 
-        return new ExportPipelineTick(new PipelineContext(runs: $this->repository, stages: $stages, state: $state));
+        return new ExportPipelineTick(new PipelineContext(runs: $this->repository, stages: $stages, state: $state), $captureWorkers);
     }
 
     private function startedRun(string $id, int $at = 1000): ExportRun
@@ -394,6 +421,135 @@ final class ExportPipelineTickTest extends TestCase
         self::assertSame(RunStatus::Cancelled, $run->status);
         self::assertSame(RunStatus::Cancelled, $this->repository->find('run-1')?->status);
         self::assertTrue($run->isTerminal());
+    }
+
+    /**
+     * Bounded capture-worker fanout: a tick at capture arms the coordinator's
+     * worker slots through the injected CaptureWorkerScheduler, one (hook,
+     * args) event per slot, at the tick's instant.
+     */
+    public function testCaptureTickArmsTheBoundedCaptureWorkerSlots(): void
+    {
+        [$tick, $workerEvents] = $this->captureTick(2, 3);
+        $run = $this->runAtCapture('run-1');
+
+        $tick->perform($run, 1001);
+
+        self::assertSame(2, $workerEvents->count(), 'one worker event per bounded slot');
+        $events = $workerEvents->all();
+        self::assertSame(CaptureWorkerScheduler::WORKER_HOOK, $events[0]['hook']);
+        self::assertSame(CaptureWorkerScheduler::WORKER_HOOK, $events[1]['hook']);
+        self::assertSame(['run-1', 1], $events[0]['args']);
+        self::assertSame(['run-1', 2], $events[1]['args']);
+        self::assertSame(1001, $events[0]['at']);
+    }
+
+    public function testRepeatedCaptureTicksDoNotStackCaptureWorkerEvents(): void
+    {
+        [$tick, $workerEvents] = $this->captureTick(2, 3);
+        $run = $this->runAtCapture('run-1');
+
+        $tick->perform($run, 1001);
+        $tick->perform($run, 1002);
+
+        self::assertSame(2, $workerEvents->count(), 'an already-armed slot is never re-armed');
+    }
+
+    public function testLeavingCaptureCancelsTheArmedCaptureWorkerSlots(): void
+    {
+        [$tick, $workerEvents] = $this->captureTick(2, 1);
+        $run = $this->runAtCapture('run-1');
+
+        $tick->perform($run, 1001);
+        self::assertSame(2, $workerEvents->count());
+
+        // The queue drains: the fixed-point unit closes capture and crosses
+        // the rewrite boundary, and the outstanding worker slots go with it.
+        $tick->perform($run, 1002);
+
+        self::assertSame(0, $workerEvents->count(), 'leaving capture cancels every armed worker slot');
+        self::assertSame('rewrite|', $this->repository->find('run-1')?->resumeCursor);
+    }
+
+    public function testTerminalRunCancelsTheArmedCaptureWorkerSlots(): void
+    {
+        [$tick, $workerEvents] = $this->captureTick(2, 3);
+        $run = $this->runAtCapture('run-1');
+        $tick->perform($run, 1001);
+        self::assertSame(2, $workerEvents->count());
+
+        $run->complete(at: 1002);
+        $this->repository->save($run);
+        $tick->perform($run, 1003);
+
+        self::assertSame(0, $workerEvents->count(), 'a terminal run leaves no armed worker slots');
+    }
+
+    public function testPausedRunCancelsTheArmedCaptureWorkerSlots(): void
+    {
+        [$tick, $workerEvents] = $this->captureTick(2, 3);
+        $run = $this->runAtCapture('run-1');
+        $tick->perform($run, 1001);
+        self::assertSame(2, $workerEvents->count());
+
+        $run->pause(at: 1002);
+        $this->repository->save($run);
+        $tick->perform($run, 1003);
+
+        self::assertSame(0, $workerEvents->count(), 'a paused run leaves no armed worker slots');
+        self::assertSame(RunStatus::Paused, $run->status, 'the tick neither resumes nor advances a paused run');
+    }
+
+    public function testSupersededRunCancelsTheArmedCaptureWorkerSlots(): void
+    {
+        [$tick, $workerEvents] = $this->captureTick(2, 3);
+        $run = $this->runAtCapture('run-1');
+        $tick->perform($run, 1001);
+        self::assertSame(2, $workerEvents->count());
+
+        $run->supersede(at: 1002);
+        $this->repository->save($run);
+        $tick->perform($run, 1003);
+
+        self::assertSame(0, $workerEvents->count(), 'a superseded run leaves no armed worker slots');
+        self::assertSame(RunStatus::Cancelled, $run->status, 'the overtaken run is cancelled exactly as before');
+    }
+
+    public function testUnwiredCaptureWorkersScheduleNothing(): void
+    {
+        // No CaptureWorkerScheduler: the pre-worker composition. The same
+        // capture tick must run untouched and schedule no worker events.
+        $queue = new InMemoryWorkItemRepository();
+        $workerEvents = new InMemoryScheduler();
+        $state = new PipelineState();
+        $transport = new FakeCaptureTransport([
+            CaptureResponse::withString(200, [], $this->html('page')),
+        ]);
+        $tick = $this->pipeline([PipelineStageKey::Capture->value => $this->captureStage($transport, $queue, $state)], $state);
+        $run = $this->runAtCapture('run-1');
+        $queue->insertCanonical('run-1', (new WorkItemFactory())->fromString('https://blog.example.test/a/'));
+
+        $result = $tick->perform($run, 1001);
+
+        self::assertFalse($result->finished);
+        self::assertSame(0, $workerEvents->count(), 'no worker fanout without a wired scheduler');
+    }
+
+    public function testNonCaptureTickWithWiredWorkersSchedulesNothing(): void
+    {
+        // A tick positioned away from capture (probe here) with the worker
+        // scheduler wired: the fanout exists at the capture position only, and
+        // every other position leaves no worker slot armed.
+        $queue = new InMemoryWorkItemRepository();
+        $workerEvents = new InMemoryScheduler();
+        $workers = new CaptureWorkerScheduler($this->repository, $workerEvents, 2);
+        $state = new PipelineState();
+        $tick = $this->pipeline([PipelineStageKey::Capture->value => $this->captureStage(new FakeCaptureTransport([]), $queue, $state)], $state, $workers);
+        $run = $this->startedRun('run-1');
+
+        $tick->perform($run, 1001);
+
+        self::assertSame(0, $workerEvents->count(), 'worker slots are armed at the capture position only');
     }
 
     public function testStageFailureReturnsASafeReasonAndPersistsState(): void
@@ -1389,5 +1545,83 @@ final class ExportPipelineTickTest extends TestCase
         new PipelineContext(runs: $this->repository, stages: [
             PipelineStageKey::Probe->value => new UnwiredStage(PipelineStageKey::Probe),
         ]);
+    }
+
+    /**
+     * The coordinator over the real capture stage, wired the way production
+     * wires it: the same CaptureStage over an in-memory work-item repository,
+     * a scripted transport and a jailed disk source, plus a real
+     * CaptureWorkerScheduler over an in-memory scheduler. Each call re-seeds
+     * the queue with $items queued rows for run run-1.
+     *
+     * @return array{ExportPipelineTick, InMemoryScheduler, InMemoryWorkItemRepository, ExportRun}
+     */
+    private function captureTick(int $maxWorkers, int $items): array
+    {
+        $queue = new InMemoryWorkItemRepository();
+        $workerEvents = new InMemoryScheduler();
+        $workers = new CaptureWorkerScheduler($this->repository, $workerEvents, $maxWorkers);
+        $state = new PipelineState();
+        $transport = new FakeCaptureTransport(array_fill(
+            0,
+            $items,
+            CaptureResponse::withString(200, [], $this->html('page')),
+        ));
+        $tick = $this->pipeline([PipelineStageKey::Capture->value => $this->captureStage($transport, $queue, $state)], $state, $workers);
+        $run = $this->runAtCapture('run-1');
+        for ($i = 0; $i < $items; ++$i) {
+            $queue->insertCanonical('run-1', (new WorkItemFactory())->fromString(sprintf('https://blog.example.test/page-%d/', $i)));
+        }
+
+        return [$tick, $workerEvents, $queue, $run];
+    }
+
+    /**
+     * The real capture stage over an in-memory queue sharing one PipelineState
+     * with the orchestrator.
+     */
+    private function captureStage(FakeCaptureTransport $transport, InMemoryWorkItemRepository $queue, PipelineState $state): CaptureStage
+    {
+        $environment = new FakeCaptureEnvironment($transport, new JailedDiskAssetSource($this->jailRoot));
+
+        return new CaptureStage($environment, $state, $queue);
+    }
+
+    /**
+     * A run the coordinator leaves behind while capture is in flight: running,
+     * in the Exporting bucket, probe and setup recorded, positioned at the
+     * capture boundary.
+     */
+    private function runAtCapture(string $id, int $at = 1000): ExportRun
+    {
+        $run = $this->startedRun($id, $at);
+        $run->advanceStage(RunStage::Exporting, at: $at);
+        $origin = Origin::fromUrl((new UrlCanonicalizer())->canonicalize('https://blog.example.test/'));
+        $run->recordProbe(new ProbeResult($origin, 'https://blog.example.test/', 2048, 5), at: $at);
+        $run->recordSetup(new SetupResult($this->workDir), at: $at);
+        $run->recordResumeCursor('capture|', at: $at);
+        $this->repository->save($run);
+
+        return $run;
+    }
+
+    private function html(string $label): string
+    {
+        return '<html><head><title>' . $label . '</title></head><body>' . str_repeat('<p>content</p>', 120) . '</body></html>';
+    }
+
+    private function removeTree(string $path): void
+    {
+        if (!is_dir($path)) {
+            return;
+        }
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST,
+        );
+        foreach ($iterator as $entry) {
+            $entry->isDir() && !$entry->isLink() ? rmdir($entry->getPathname()) : unlink($entry->getPathname());
+        }
+        rmdir($path);
     }
 }

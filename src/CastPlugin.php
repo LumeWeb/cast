@@ -53,6 +53,8 @@ use LumeWeb\Cast\Export\WordPressWrapupEnvironment;
 use LumeWeb\Cast\Export\WrapupStage;
 use LumeWeb\Cast\Http\GuzzleHttpClientFactory;
 use LumeWeb\Cast\Http\HttpTransport;
+use LumeWeb\Cast\Jobs\CaptureWorker;
+use LumeWeb\Cast\Jobs\CaptureWorkerScheduler;
 use LumeWeb\Cast\Jobs\ContentPublishScheduler;
 use LumeWeb\Cast\Jobs\ExportPipelineTick;
 use LumeWeb\Cast\Jobs\ExportTickRunner;
@@ -514,7 +516,11 @@ final class CastPlugin
             clock: $clock,
             lock: $lock,
             repository: $repository,
-            tick: new ExportPipelineTick($pipeline),
+            // The coordinator owns the bounded capture-worker fanout: a tick
+            // at capture arms the run's worker slots, and every path that
+            // leaves capture (stage boundary, terminal, paused, superseded)
+            // cancels the outstanding slots.
+            tick: new ExportPipelineTick($pipeline, new CaptureWorkerScheduler($repository, $scheduler)),
             identity: $identity,
             config: $exportTickConfig ?? new TickConfig(reclaimStaleLocks: true),
         );
@@ -631,6 +637,17 @@ final class CastPlugin
                 $clock,
                 retentionScheduler: $retentionScheduler,
                 retentionRunner: $retentionRunner,
+                // One real one-item capture worker per (runId, slot) event
+                // identity, each with a slot-specific claim token so a
+                // duplicate fanout never steals a live lease. The same run
+                // repository, work-item queue and capture environment the
+                // capture stage runs on.
+                captureWorkerFactory: static fn (string $runId, int $slot): CaptureWorker => new CaptureWorker(
+                    $repository,
+                    $items,
+                    $captureEnvironment,
+                    workerToken: sprintf('%s-%d', CaptureWorker::DEFAULT_WORKER_TOKEN, $slot),
+                ),
             ),
             // Publish REST routes: GET status + POST start under cast/v1,
             // capability + wp_rest nonce gated (rest_api_init only).
