@@ -173,6 +173,77 @@ final class IpfsWebsitesClientTest extends TestCase
         self::assertStringNotContainsString('"generate"', $body);
     }
 
+    public function testCreatePlatformGeneratedSendsPlatformRootAndNamespaceWithManagedDns(): void
+    {
+        // The platform-generation wire branch (pinner-cli websites_wizard
+        // contract): generate + managed dns hosting + the selected platform
+        // root/namespace, and NONE of label, custom domain, or custom
+        // namespace — a made-up label must never ride along.
+        $recording = $this->recording([new Response(201, [], $this->websiteResponse())]);
+        $client = new IpfsWebsitesClient($recording->transport(), self::BASE_URL, self::API_KEY);
+
+        $client->create(new CreateWebsiteRequest(
+            'k51qzi5uqu5djg',
+            'ipns',
+            label: null,
+            domain: null,
+            namespace: null,
+            generate: true,
+            dnsHostingEnabled: true,
+            platformDomain: 'pinned.site',
+            platformNamespace: 'icann',
+        ));
+
+        $body = (string) $recording->lastRequest()->getBody();
+        self::assertSame(
+            '{"target_hash":"k51qzi5uqu5djg","target_type":"ipns","platform_domain":"pinned.site","platform_namespace":"icann","generate":true,"dns_hosting_enabled":true}',
+            $body,
+        );
+        self::assertStringNotContainsString('"label"', $body);
+        self::assertStringNotContainsString('"domain"', $body);
+        self::assertStringNotContainsString('"namespace"', $body);
+    }
+
+    public function testCreateCustomDomainSendsExplicitDnsHostingFalse(): void
+    {
+        // The self-managed custom-domain wire branch: the explicit
+        // dns_hosting_enabled: false MUST hit the wire — omitting the key
+        // lets the portal default to managed hosting.
+        $recording = $this->recording([new Response(201, [], $this->websiteResponse())]);
+        $client = new IpfsWebsitesClient($recording->transport(), self::BASE_URL, self::API_KEY);
+
+        $client->create(new CreateWebsiteRequest(
+            'k51qzi5uqu5djg',
+            'ipns',
+            label: null,
+            domain: 'shop.example.com',
+            namespace: 'icann',
+            generate: false,
+            dnsHostingEnabled: false,
+        ));
+
+        $body = (string) $recording->lastRequest()->getBody();
+        self::assertSame(
+            '{"target_hash":"k51qzi5uqu5djg","target_type":"ipns","domain":"shop.example.com","namespace":"icann","dns_hosting_enabled":false}',
+            $body,
+        );
+        self::assertStringNotContainsString('"generate"', $body);
+        self::assertStringNotContainsString('"label"', $body);
+        self::assertStringNotContainsString('platform', $body);
+    }
+
+    public function testCreateOmitsDnsHostingKeyWhenNotStated(): void
+    {
+        // A request that never states a DNS-hosting choice sends no
+        // dns_hosting_enabled key at all (the tri-state: absent is not false).
+        $recording = $this->recording([new Response(201, [], $this->websiteResponse())]);
+        $client = new IpfsWebsitesClient($recording->transport(), self::BASE_URL, self::API_KEY);
+
+        $client->create(new CreateWebsiteRequest('QmCid', 'car', 'mysite'));
+
+        self::assertStringNotContainsString('dns_hosting', (string) $recording->lastRequest()->getBody());
+    }
+
     public function testCreateNormalizesWebsiteTargetTypeToIpfsOnTheWire(): void
     {
         // RunSettings defaults the internal target type to 'website', but the

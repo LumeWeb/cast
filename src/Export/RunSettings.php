@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LumeWeb\Cast\Export;
 
 use LumeWeb\Cast\Publish\Contract;
+use LumeWeb\Cast\Publish\PublishDestination;
 
 /**
  * Immutable snapshot of the settings an export/publish run started with.
@@ -35,6 +36,7 @@ final class RunSettings
         public readonly int $uploadLimitBytes = Contract::UPLOAD_LIMIT_BYTES,
         public readonly int $maxRetries = 3,
         public readonly string $startCursor = '',
+        public readonly ?PublishDestination $destination = null,
     ) {
     }
 
@@ -52,7 +54,8 @@ final class RunSettings
      *     artifact_name: string,
      *     upload_limit_bytes: int,
      *     max_retries: int,
-     *     start_cursor: string
+     *     start_cursor: string,
+     *     destination: array<string, scalar|null>|null
      * }
      */
     public function toArray(): array
@@ -64,6 +67,7 @@ final class RunSettings
             'upload_limit_bytes' => $this->uploadLimitBytes,
             'max_retries' => $this->maxRetries,
             'start_cursor' => $this->startCursor,
+            'destination' => $this->destination?->toArray(),
         ];
     }
 
@@ -93,6 +97,7 @@ final class RunSettings
             uploadLimitBytes: is_int($uploadLimitBytes) ? $uploadLimitBytes : Contract::UPLOAD_LIMIT_BYTES,
             maxRetries: is_int($maxRetries) ? $maxRetries : 3,
             startCursor: is_string($startCursor) ? $startCursor : '',
+            destination: PublishDestination::fromArray($data['destination'] ?? null),
         );
     }
 

@@ -7,6 +7,7 @@ namespace LumeWeb\Cast\Tests\Unit\Publish;
 use LumeWeb\Cast\Jobs\PublishIdentity;
 use LumeWeb\Cast\Jobs\WordPressIdentityGateway;
 use LumeWeb\Cast\Publish\Artifact;
+use LumeWeb\Cast\Publish\PublishDestination;
 use LumeWeb\Cast\Publish\PublishService;
 use LumeWeb\Cast\Publish\UploadResult;
 use LumeWeb\Cast\Publish\UploadRouter;
@@ -212,7 +213,10 @@ final class WordPressPublishRegistryTest extends TestCase
             readiness: new WebsiteReadinessWaiter($websites, new FakePublishClock()),
         );
 
-        $service->publish(new Artifact('/tmp/cast-export/run-abc-123.zip', 'run-abc-123.zip', 'ipfs-dir', 'example.com', 2048));
+        $service->publish(
+            new Artifact('/tmp/cast-export/run-abc-123.zip', 'run-abc-123.zip', 'ipfs-dir', 'example.com', 2048),
+            PublishDestination::platformLabelled('example.com'),
+        );
 
         self::assertTrue($this->identity->hasIdentity());
         $current = $this->identity->current();

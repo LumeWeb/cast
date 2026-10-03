@@ -27,6 +27,12 @@ use LumeWeb\Cast\Jobs\PublishModeStore;
 use LumeWeb\Cast\Onboarding\WizardState;
 use LumeWeb\Cast\Onboarding\WizardStore;
 use LumeWeb\Cast\Publish\CreateWebsiteRequest;
+use LumeWeb\Cast\Publish\DomainClient;
+use LumeWeb\Cast\Publish\DomainClientException;
+use LumeWeb\Cast\Publish\PublishDestination;
+use LumeWeb\Cast\Publish\PublishDestinationLifecycle;
+use LumeWeb\Cast\Publish\PublishDestinationSource;
+use LumeWeb\Cast\Publish\PublishDestinationStore;
 use LumeWeb\Cast\Publish\PublishRegistry;
 
 /**
@@ -127,6 +133,20 @@ final class PublishSetupService
         private readonly ?PublishRegistry $registry = null,
         private readonly ?WorkspaceLinker $workspaces = null,
         private readonly ?IpnsResolver $ipns = null,
+        // The first-publish destination setup store: the read/save/confirm
+        // surface and the first-publish gate read one shared, persisted
+        // choice; the scheduler snapshots the confirmed destination into
+        // every fresh run's settings. Without it the destination actions
+        // refuse (store_unavailable) and the first publish refuses until a
+        // confirmed destination exists.
+        private readonly ?PublishDestinationStore $destinationStore = null,
+        // The domain adapters (the same DomainClient the DomainSetupService
+        // composes): the awaiting-DNS resume gate reads the registered
+        // website's bound domains and runs the existing verify adapter before
+        // a parked custom-domain run may replay its artifact. Without it an
+        // awaiting-DNS resume refuses (the DNS cannot be proven verified) and
+        // the run stays parked.
+        private readonly ?DomainClient $domains = null,
     ) {
     }
 
@@ -146,6 +166,11 @@ final class PublishSetupService
         // surfaced when the wait is real (and after any write-through has had
         // its say) — never alongside a settled identity.
         $awaitingWebsite = $this->awaitingWebsiteFor($latest);
+        // The explicit custom-domain DNS wait: the run parked at the
+        // awaiting-DNS boundary. Its own signal — the selected domain is
+        // surfaced from the run's confirmed destination snapshot, never an
+        // implicit list pick.
+        $awaitingDns = $this->awaitingDnsFor($latest);
 
         return new PublishStatus(
             bootstrapIdentityComplete: $envProblems === [],
@@ -191,7 +216,249 @@ final class PublishSetupService
             // awaiting (the top-level publish_cid is null for a resumable
             // boundary, so the S1 copy quotes this instead).
             awaitingCid: $awaitingWebsite ? self::parkedCidFor($latest) : null,
+            // The explicit awaiting-DNS park and its selected domain (null
+            // outside the park, so an ordinary poll carries no DNS signal).
+            awaitingDns: $awaitingDns,
+            awaitingDomain: $awaitingDns ? $latest?->settings->destination?->domain : null,
+            // The persisted destination setup (lifecycle + fields), so a
+            // refresh restores the uncreated confirmed choice instead of
+            // discarding it.
+            destination: PublishDestinationView::fromState($this->destinationStore?->read()),
+            // Copy-only: the explicitly-skipped onboarding state, so the UI
+            // copy can tell "finish onboarding" (incomplete) apart from
+            // "you skipped it, just publish". The publish gates keep using
+            // the terminal onboardingComplete flag above — unchanged.
+            onboardingSkipped: $wizardState === WizardState::Skipped,
         );
+    }
+
+    /**
+     * The persisted destination setup (lifecycle + field view) — the
+     * read surface for the destination wizard. A missing store or an
+     * absent setup both report "no setup yet".
+     */
+    public function readDestination(): PublishDestinationView
+    {
+        return PublishDestinationView::fromState($this->destinationStore?->read());
+    }
+
+    /**
+     * Save a destination as an editable draft.
+     *
+     * Only the allowlisted source fields are parsed into the typed
+     * {@see PublishDestination} (corrupt/forbidden shapes refuse with the
+     * fixed invalid_input code, side-effect free). A confirmed or
+     * created/attached destination can never be overwritten.
+     *
+     * @param array<string, mixed> $input
+     */
+    public function saveDestination(array $input): PublishDestinationSaveResult
+    {
+        $store = $this->destinationStore;
+        if ($store === null) {
+            return new PublishDestinationSaveResult(false, PublishDestinationRefusal::StoreUnavailable);
+        }
+
+        $current = $store->read();
+        if ($current !== null && $current->lifecycle !== PublishDestinationLifecycle::Draft) {
+            $refusal = $current->lifecycle === PublishDestinationLifecycle::Confirmed
+                ? PublishDestinationRefusal::ConfirmedCannotChange
+                : PublishDestinationRefusal::CreatedOrAttachedCannotChange;
+
+            return new PublishDestinationSaveResult(false, $refusal, $current->lifecycle->value);
+        }
+
+        $destination = self::destinationFromInput($input);
+        if ($destination === null) {
+            return new PublishDestinationSaveResult(false, PublishDestinationRefusal::InvalidInput, $current?->lifecycle->value);
+        }
+
+        $store->saveDraft($destination);
+
+        return new PublishDestinationSaveResult(true, null, PublishDestinationLifecycle::Draft->value);
+    }
+
+    /**
+     * Freeze the destination as the confirmed first-publish choice.
+     *
+     * Idempotent for an unchanged confirmed destination (a page refresh
+     * re-confirming the same uncreated choice never discards it); any change
+     * of a confirmed destination, and every action on a created/attached
+     * one, is refused with a fixed code before anything is written.
+     *
+     * An EXISTING-site choice is attached to the workspace as part of the
+     * confirmation: a 409 (the website already belongs to a workspace) is a
+     * fixed already-attached refusal, any other attach failure is a fixed
+     * attach-failed refusal, and only a successful attach lets the
+     * destination freeze as created/attached with the identity recorded.
+     *
+     * @param array<string, mixed> $input
+     */
+    public function confirmDestination(array $input): PublishDestinationConfirmResult
+    {
+        $store = $this->destinationStore;
+        if ($store === null) {
+            return new PublishDestinationConfirmResult(false, PublishDestinationRefusal::StoreUnavailable);
+        }
+
+        $current = $store->read();
+        if ($current !== null && $current->lifecycle === PublishDestinationLifecycle::CreatedOrAttached) {
+            return new PublishDestinationConfirmResult(
+                false,
+                PublishDestinationRefusal::CreatedOrAttachedCannotChange,
+                $current->lifecycle->value,
+            );
+        }
+
+        $destination = self::destinationFromInput($input);
+        if ($destination === null) {
+            return new PublishDestinationConfirmResult(false, PublishDestinationRefusal::InvalidInput, $current?->lifecycle->value);
+        }
+
+        if (
+            $current !== null
+            && $current->lifecycle === PublishDestinationLifecycle::Confirmed
+            && $current->destination->toArray() !== $destination->toArray()
+        ) {
+            return new PublishDestinationConfirmResult(
+                false,
+                PublishDestinationRefusal::ConfirmedCannotChange,
+                $current->lifecycle->value,
+            );
+        }
+
+        // An existing site is attached to the workspace the moment the choice
+        // is confirmed — and the destination only freezes (and the identity
+        // only records) once that attach has succeeded, so a failed attach
+        // can never leave a confirmed address behind.
+        $attachOutcome = $destination->source === PublishDestinationSource::Existing
+            ? $this->attachExistingDestination($destination)
+            : 'not-applicable';
+
+        if ($attachOutcome === 'conflict') {
+            return new PublishDestinationConfirmResult(
+                false,
+                PublishDestinationRefusal::WebsiteAlreadyAttached,
+                $current?->lifecycle->value,
+            );
+        }
+        if ($attachOutcome === 'failed') {
+            return new PublishDestinationConfirmResult(
+                false,
+                PublishDestinationRefusal::AttachFailed,
+                $current?->lifecycle->value,
+            );
+        }
+
+        try {
+            $store->confirm($destination);
+        } catch (\InvalidArgumentException) {
+            // The store's own lifecycle guard (a concurrent change between the
+            // read above and the write): surface the fixed code, never the
+            // exception message.
+            return new PublishDestinationConfirmResult(false, PublishDestinationRefusal::ConfirmedCannotChange);
+        }
+
+        // The attach already succeeded: freeze the destination as
+        // created/attached (terminal — there is no detach API) right away.
+        if ($attachOutcome === 'attached') {
+            $store->markCreatedOrAttached();
+
+            return new PublishDestinationConfirmResult(true, null, PublishDestinationLifecycle::CreatedOrAttached->value);
+        }
+
+        return new PublishDestinationConfirmResult(true, null, PublishDestinationLifecycle::Confirmed->value);
+    }
+
+    /**
+     * The confirm-time attach half of an existing-site choice.
+     *
+     * Returns 'attached' (the attach struck AND the identity was recorded — in
+     * that order, so a failed attach can never fake a linked state),
+     * 'conflict' (the attach 409: the chosen website already belongs to a
+     * workspace), 'failed' (any other attach rejection), or
+     * 'not-applicable' when the attach adapters or the workspace id cannot be
+     * resolved — in which case the choice is confirmed plain and the attach
+     * is deferred to the publish boundary.
+     */
+    private function attachExistingDestination(PublishDestination $destination): string
+    {
+        if ($this->workspaces === null || $this->registry === null) {
+            return 'not-applicable';
+        }
+
+        $workspaceId = $this->resolveWorkspaceId();
+        if ($workspaceId === null) {
+            return 'not-applicable';
+        }
+
+        try {
+            $this->workspaces->attach($workspaceId, (int) $destination->websiteId);
+        } catch (UnexpectedStatusCodeException $exception) {
+            // The 409 is the one conflict with its own friendly code (the
+            // website is in use elsewhere); every other rejection is a plain
+            // attach failure the operator can retry.
+            return $exception->status() === 409 ? 'conflict' : 'failed';
+        } catch (HttpException) {
+            return 'failed';
+        }
+
+        $this->registry->recordWebsite(
+            (string) $destination->websiteId,
+            $this->websiteNameFor((int) $destination->websiteId),
+        );
+
+        return 'attached';
+    }
+
+    /**
+     * The allowlisted destination fields a request may set — the ONLY keys
+     * parsed into a {@see PublishDestination}; anything else is dropped so a
+     * forged/extra param can never alter the stored choice.
+     *
+     * @return list<string>
+     */
+    private const DESTINATION_FIELDS = [
+        'source', 'domain', 'namespace', 'dns_hosting_enabled',
+        'platform_domain', 'platform_namespace', 'generate', 'label', 'website_id',
+    ];
+
+    /**
+     * Parse request input into a typed destination, or null for any shape the
+     * destination aggregate rejects (unknown source, missing field, or an
+     * impossible combination).
+     *
+     * @param array<string, mixed> $input
+     */
+    private static function destinationFromInput(array $input): ?PublishDestination
+    {
+        $data = [];
+        foreach (self::DESTINATION_FIELDS as $field) {
+            if (array_key_exists($field, $input)) {
+                $data[$field] = $input[$field];
+            }
+        }
+
+        // Platform subdomains are DNS-managed by the platform, always: the
+        // invariant is applied when the client omits the flag (a custom
+        // domain must still state it explicitly, true or false).
+        if (($data['source'] ?? null) === 'platform' && !array_key_exists('dns_hosting_enabled', $data)) {
+            $data['dns_hosting_enabled'] = true;
+        }
+
+        return PublishDestination::fromArray($data);
+    }
+
+    /**
+     * Whether a confirmed (or already created/attached) destination is
+     * persisted — the first-publish precondition.
+     */
+    private function hasConfirmedDestination(): bool
+    {
+        $state = $this->destinationStore?->read();
+
+        return $state !== null
+            && in_array($state->lifecycle, [PublishDestinationLifecycle::Confirmed, PublishDestinationLifecycle::CreatedOrAttached], true);
     }
 
     public function startFirstPublish(): PublishStartResult
@@ -218,6 +485,15 @@ final class PublishSetupService
 
         if ($this->identity->hasIdentity()) {
             return new PublishStartResult(false, PublishStartRefusal::IdentityConflict);
+        }
+
+        // A first publish (no identity yet) must carry an explicit, confirmed
+        // destination: the scheduler snapshots it into the fresh run's
+        // settings, so an implicit hostname can never define the address.
+        // Once an identity exists the gate no longer applies (this is no
+        // longer a first publish, and later publishes are unchanged).
+        if (!$this->hasConfirmedDestination()) {
+            return new PublishStartResult(false, PublishStartRefusal::DestinationNotConfirmed);
         }
 
         // Manual-run-wins: absorb the pending run, or create a fresh dirty run
@@ -345,6 +621,19 @@ final class PublishSetupService
 
         if (!$this->hasIntactArtifact($source)) {
             return new PublishExistingResult(false, PublishExistingRefusal::NoArtifact);
+        }
+
+        // A run parked at the explicit custom-domain awaiting-DNS boundary
+        // only resumes once the domain's DNS is verified: an incomplete (or
+        // unverifiable) DNS keeps it parked — a fixed, side-effect-free
+        // refusal, nothing seeded — while a verified DNS lets the intact
+        // artifact replay through the normal publish-only path below. Every
+        // other parked/terminal source skips this gate entirely.
+        if (
+            $source->publish?->status === PublishBoundaryStatus::AwaitingDns
+            && !$this->customDomainDnsVerified($source)
+        ) {
+            return new PublishExistingResult(false, PublishExistingRefusal::DomainDnsNotVerified);
         }
 
         // Re-publishing a terminal run needs the existing website/IPNS identity
@@ -653,8 +942,16 @@ final class PublishSetupService
 
         $domain = $hostname !== '' ? trim($hostname) : null;
 
-        try {
-            $website = $this->websites->create(new CreateWebsiteRequest(
+        // A run that carries a confirmed destination provisions from IT — the
+        // exact platform/custom wire branch the destination aggregate
+        // validated — and a client-supplied hostname can never override the
+        // choice. The hostname still speaks only for legacy parked runs that
+        // predate destination capture (and existing sites, which attach
+        // through the link path, never create).
+        $destination = $run?->settings->destination;
+        $request = $destination !== null && $destination->source !== PublishDestinationSource::Existing
+            ? CreateWebsiteRequest::forDestination($destination, $targetHash, $targetType)
+            : new CreateWebsiteRequest(
                 targetHash: $targetHash,
                 targetType: $targetType,
                 // label is optional metadata: only a real hostname is a sane
@@ -665,7 +962,10 @@ final class PublishSetupService
                 namespace: $domain !== null ? 'icann' : null,
                 generate: $domain === null,
                 dnsHostingEnabled: true,
-            ));
+            );
+
+        try {
+            $website = $this->websites->create($request);
         } catch (HttpException) {
             return new PublishWebsiteCreateResult(false, PublishWebsiteRefusal::CreateFailed);
         }
@@ -879,6 +1179,70 @@ final class PublishSetupService
         }
 
         return (string) $websiteId;
+    }
+
+    /**
+     * The explicit custom-domain DNS-wait boundary: the run parked at the
+     * publish boundary as awaiting_dns (the website was created and its
+     * identity recorded; the domain's DNS is not connected yet). Deliberately
+     * distinct from the generic resumable park and from the awaiting-website
+     * signal — a normal DNS wait is a waiting state, never a failure.
+     */
+    private function awaitingDnsFor(?ExportRun $run): bool
+    {
+        return $run?->publish?->status === PublishBoundaryStatus::AwaitingDns;
+    }
+
+    /**
+     * Whether the run's selected custom domain has a VERIFIED DNS binding —
+     * the resume gate for a parked awaiting-DNS run.
+     *
+     * Reuses the existing domain adapters (never a new wire path): the
+     * registered website's bound-domain list is read site-locked (the website
+     * id always from the identity gateway, never a client value), the row
+     * matching the run's confirmed destination domain is found, and the
+     * existing verify adapter is run against it. Verified means the portal
+     * reports a valid binding status ('active' / 'onchain_managed' — the same
+     * set the domain panel treats as fully validated). A missing adapter,
+     * unreadable list, missing match, missing identity, or a failed verify
+     * all keep the run waiting: an unverifiable DNS is an incomplete DNS.
+     */
+    private function customDomainDnsVerified(ExportRun $run): bool
+    {
+        $domain = $run->settings->destination?->domain;
+        if ($domain === null || $this->domains === null) {
+            return false;
+        }
+
+        $websiteId = $this->identity->current()?->websiteId;
+        if ($websiteId === null) {
+            return false;
+        }
+
+        try {
+            $bound = $this->domains->list($websiteId);
+        } catch (DomainClientException) {
+            return false;
+        }
+
+        $match = null;
+        foreach ($bound as $candidate) {
+            if ($candidate->domain === $domain) {
+                $match = $candidate;
+                break;
+            }
+        }
+        if ($match === null) {
+            return false;
+        }
+
+        try {
+            $verified = $this->domains->verify($websiteId, $match->id);
+        } catch (DomainClientException) {
+            return false;
+        }
+
+        return in_array($verified->status, ['active', 'onchain_managed'], true);
     }
 
     /**

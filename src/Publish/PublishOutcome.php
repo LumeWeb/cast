@@ -15,4 +15,8 @@ enum PublishOutcome: string
     case Completed = 'completed';
     case Failed = 'failed';
     case Resumable = 'resumable';
+    /** A custom-domain first publish that created its website and now waits
+     * for the domain's DNS to connect: an explicit, deliberate waiting state
+     * (CID/IPNS/website preserved) — never a failure. */
+    case AwaitingDns = 'awaiting_dns';
 }

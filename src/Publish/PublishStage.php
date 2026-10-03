@@ -17,6 +17,9 @@ enum PublishStage: string
     case CreatingIpnsKey = 'creating_ipns_key';
     case PublishingIpns = 'publishing_ipns';
     case CheckingReadiness = 'checking_readiness';
+    /** A custom-domain first publish paused after the website create: the
+     * upload is done and the site waits for the domain's DNS to connect. */
+    case AwaitingDns = 'awaiting_dns';
     case Completed = 'completed';
     case Failed = 'failed';
     case Resumable = 'resumable';

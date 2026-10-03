@@ -90,4 +90,35 @@ final class PublishRestHandler
     {
         return $this->service->availableWebsites()->toArray();
     }
+
+    /**
+     * The persisted destination setup (lifecycle + fields, or the empty
+     * view when none exists yet).
+     *
+     * @return array<string, mixed>
+     */
+    public function destination(): array
+    {
+        return $this->service->readDestination()->toArray();
+    }
+
+    /**
+     * @param array<string, mixed> $input
+     *
+     * @return array<string, mixed>
+     */
+    public function saveDestination(array $input): array
+    {
+        return $this->service->saveDestination($input)->toArray();
+    }
+
+    /**
+     * @param array<string, mixed> $input
+     *
+     * @return array<string, mixed>
+     */
+    public function confirmDestination(array $input): array
+    {
+        return $this->service->confirmDestination($input)->toArray();
+    }
 }

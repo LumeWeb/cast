@@ -72,6 +72,7 @@ final class RunSettingsTest extends TestCase
                 'upload_limit_bytes' => Contract::UPLOAD_LIMIT_BYTES,
                 'max_retries' => 4,
                 'start_cursor' => '',
+                'destination' => null,
             ],
             $settings->toArray(),
         );

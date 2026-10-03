@@ -686,7 +686,7 @@ final class DomainSetupServiceTest extends TestCase
             'error' => null,
         ]);
 
-        $view = $this->service()->dashboard();
+        $view = $this->service()->dashboard(onboardingComplete: true, destinationDomain: 'site.example.test');
 
         self::assertSame(DomainDashboardView::STATE_READY, $view->state);
         self::assertSame(DomainDashboardView::LIST_OK, $view->listStatus);
@@ -695,11 +695,85 @@ final class DomainSetupServiceTest extends TestCase
         self::assertSame(DomainDashboardView::SSL_READY, $view->sslState);
         self::assertSame(DomainDashboardView::DNS_OK, $view->dnsState);
 
-        // list first, then the SSL + DNS reads scoped to the selected (first)
-        // bound domain — the website id always derived from the identity.
+        // list first, then the SSL + DNS reads scoped to the explicitly
+        // selected destination domain — the website id always derived from
+        // the identity.
         self::assertSame('list', $this->client->calls[0][0]);
         self::assertSame(['sslStatus', ['site.example.test']], $this->client->calls[1]);
         self::assertSame(['dnsRequirements', ['web-42', '99']], $this->client->calls[2]);
+    }
+
+    public function testDashboardScopesSslAndDnsToTheDestinationDomainNotFirstListed(): void
+    {
+        $this->identity->setCurrentIdentity($this->readyIdentity());
+        $this->client->domains = [
+            new \LumeWeb\Cast\Publish\Domain('99', 'other.example.test', 'icann', true, 'waiting_delegation', 'gw.example.com'),
+            new \LumeWeb\Cast\Publish\Domain('7', 'shop.example.test', 'icann', false, 'active', 'gw.example.com'),
+        ];
+        $this->client->ssl = \LumeWeb\Cast\Ipfs\SslStatusInfo::fromArray([
+            'status' => 'ready',
+            'issued_at' => '2026-01-02T00:00:00Z',
+            'last_updated_at' => '2026-01-02T00:00:00Z',
+            'error' => null,
+        ]);
+
+        $view = $this->service()->dashboard(onboardingComplete: true, destinationDomain: 'shop.example.test');
+
+        // The DNS/SSL block is the destination's own bundle — the second
+        // listed domain — never the first-listed one.
+        self::assertSame(DomainDashboardView::DNS_OK, $view->dnsState);
+        self::assertIsArray($view->dnsDomain);
+        self::assertSame('7', $view->dnsDomain['id']);
+        self::assertSame('shop.example.test', $view->dnsDomain['domain']);
+        self::assertSame(DomainDashboardView::SSL_READY, $view->sslState);
+
+        // list first, then the SSL + DNS reads scoped to the destination
+        // domain, not to domains[0].
+        self::assertSame('list', $this->client->calls[0][0]);
+        self::assertSame(['sslStatus', ['shop.example.test']], $this->client->calls[1]);
+        self::assertSame(['dnsRequirements', ['web-42', '7']], $this->client->calls[2]);
+    }
+
+    public function testDashboardSelectsNoDomainWhenTheDestinationIsNotBound(): void
+    {
+        $this->identity->setCurrentIdentity($this->readyIdentity());
+        $this->client->domains = [
+            new \LumeWeb\Cast\Publish\Domain('99', 'other.example.test', 'icann', true, 'waiting_delegation', 'gw.example.com'),
+        ];
+
+        $view = $this->service()->dashboard(onboardingComplete: true, destinationDomain: 'missing.example.test');
+
+        // The destination is not among the bound domains: no implicit
+        // fall-back to some other bound domain — no SSL/DNS reads at all.
+        self::assertSame(DomainDashboardView::DNS_NONE, $view->dnsState);
+        self::assertSame(DomainDashboardView::SSL_NONE, $view->sslState);
+        self::assertNull($view->dnsDomain);
+        self::assertFalse($view->canVerify);
+        self::assertFalse($view->canValidate);
+        self::assertFalse($view->canReadDns);
+        self::assertFalse($view->canReadSsl);
+        self::assertCount(1, $this->client->calls);
+        self::assertSame('list', $this->client->calls[0][0]);
+    }
+
+    public function testDashboardNeverImplicitlySelectsTheFirstListedDomain(): void
+    {
+        $this->identity->setCurrentIdentity($this->readyIdentity());
+        $this->client->domains = [
+            new \LumeWeb\Cast\Publish\Domain('99', 'site.example.test', 'icann', true, 'waiting_delegation', 'gw.example.com'),
+        ];
+
+        // No destination domain supplied: there is no selected domain, so the
+        // panel must not silently adopt the first listed one.
+        $view = $this->service()->dashboard(onboardingComplete: true);
+
+        self::assertSame(DomainDashboardView::DNS_NONE, $view->dnsState);
+        self::assertSame(DomainDashboardView::SSL_NONE, $view->sslState);
+        self::assertNull($view->dnsDomain);
+        self::assertFalse($view->canReadDns);
+        self::assertFalse($view->canReadSsl);
+        self::assertCount(1, $this->client->calls);
+        self::assertSame('list', $this->client->calls[0][0]);
     }
 
     public function testDashboardPanelReflectsMissingWebsiteIdentity(): void

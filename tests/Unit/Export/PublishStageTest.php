@@ -10,9 +10,11 @@ use LumeWeb\Cast\Export\PackStatus;
 use LumeWeb\Cast\Export\PipelineStageKey;
 use LumeWeb\Cast\Export\PipelineState;
 use LumeWeb\Cast\Export\ProbeResult;
+use LumeWeb\Cast\Export\PublishBoundaryResult;
 use LumeWeb\Cast\Export\PublishBoundaryStatus;
 use LumeWeb\Cast\Export\PublishStage;
 use LumeWeb\Cast\Publish\PollPolicy;
+use LumeWeb\Cast\Publish\PublishDestination;
 use LumeWeb\Cast\Publish\PublishService;
 use LumeWeb\Cast\Publish\UploadResult;
 use LumeWeb\Cast\Publish\UploadRouter;
@@ -37,8 +39,10 @@ use PHPUnit\Framework\TestCase;
  * {@see PublishBoundaryResult} onto the shared state. The stage itself never
  * loads WordPress (fakes stand in for the clients) and never touches the run
  * aggregate. A publish failure — Failed or Resumable — surfaces as a stage
- * failure so the tick runner retries it; the durable PublishRegistry the
- * service reads makes a retry resume from exactly where the publish stalled.
+ * failure so the tick runner retries it; a custom-domain awaiting-DNS pause
+ * is a deliberate park (no failure) that pauses the run; the durable
+ * PublishRegistry the service reads makes a retry resume from exactly where
+ * the publish stalled.
  */
 final class PublishStageTest extends TestCase
 {
@@ -79,7 +83,7 @@ final class PublishStageTest extends TestCase
     public function testCompletedPublishReturnsDoneAndRecordsCompletedBoundaryResult(): void
     {
         $state = $this->stateWithPack();
-        $stage = new PublishStage($this->service, $state, 'ipfs-dir', 'example.com');
+        $stage = new PublishStage($this->service, $state, 'ipfs-dir', 'example.com', PublishDestination::platformLabelled('example.com'));
 
         $result = $stage->execute('');
 
@@ -101,6 +105,41 @@ final class PublishStageTest extends TestCase
         self::assertSame('QmHash', $state->publish->cid);
         self::assertSame('website-1', $state->publish->websiteId);
         self::assertSame('k1-example.com', $state->publish->ipnsKey);
+    }
+
+    public function testStagePassesTheRunDestinationThroughToTheService(): void
+    {
+        // The stage hands the run's confirmed destination snapshot to the
+        // service: the same first publish that fails closed without one
+        // completes with it, and the website claim carries the destination's
+        // label — not the stage's artifact label argument.
+        $state = $this->stateWithPack();
+        $stage = new PublishStage($this->service, $state, 'ipfs-dir', 'stale.example.test', PublishDestination::platformLabelled('my-site'));
+
+        $result = $stage->execute('');
+
+        self::assertTrue($result->done);
+        self::assertCount(1, $this->websites->created);
+        self::assertSame('my-site', $this->websites->created[0]->label);
+        self::assertNull($this->websites->created[0]->domain);
+    }
+
+    public function testStageWithoutADestinationFailsClosedOnAFirstPublish(): void
+    {
+        // No destination snapshot and no recorded identity: the stage must
+        // fail with the fixed missing-address refusal instead of letting the
+        // service mint a website from the artifact label.
+        $state = $this->stateWithPack();
+        $stage = new PublishStage($this->service, $state, 'ipfs-dir', 'example.com');
+
+        $result = $stage->execute('');
+
+        self::assertFalse($result->done);
+        self::assertNotNull($result->failure);
+        self::assertStringContainsString('no confirmed site address', (string) $result->failure);
+        self::assertSame([], $this->websites->created);
+        self::assertNotNull($state->publish);
+        self::assertSame(PublishBoundaryStatus::Failed, $state->publish->status);
     }
 
     public function testFailedPublishReturnsAFailureAndRecordsFailedBoundaryResult(): void
@@ -151,7 +190,7 @@ final class PublishStageTest extends TestCase
         // retries instead of advertising a publish that is not serving the CID.
         $this->websites->loopResponse = new Website('website-1', '', 'QmHash', 'ipfs-dir', null, 'pending', null);
         $state = $this->stateWithPack();
-        $stage = new PublishStage($this->service, $state, 'ipfs-dir', 'example.com');
+        $stage = new PublishStage($this->service, $state, 'ipfs-dir', 'example.com', PublishDestination::platformLabelled('example.com'));
 
         $result = $stage->execute('');
 
@@ -166,6 +205,36 @@ final class PublishStageTest extends TestCase
         self::assertSame('QmHash', $state->publish->cid);
         self::assertSame('website-1', $state->publish->websiteId);
         self::assertSame('k1-example.com', $state->publish->ipnsKey);
+    }
+
+    public function testCustomDomainFirstPublishParksTheBoundaryAsAwaitingDns(): void
+    {
+        // A custom-domain first publish pauses after the website create: the
+        // boundary is the EXPLICIT awaiting-DNS state (not a generic
+        // resumable failure), the CID/website/IPNS identity is preserved, and
+        // the stage result is a deliberate park — no failure, so the tick
+        // runner pauses the run instead of retrying (a retry would re-enter
+        // the publish boundary and risk re-uploading).
+        $state = $this->stateWithPack();
+        $stage = new PublishStage($this->service, $state, 'ipns', 'example.com', PublishDestination::custom('shop.example.com', 'icann', false));
+
+        $result = $stage->execute('');
+
+        self::assertFalse($result->done);
+        self::assertNull($result->failure);
+        self::assertTrue($result->parked);
+
+        self::assertNotNull($state->publish);
+        self::assertSame(PublishBoundaryStatus::AwaitingDns, $state->publish->status);
+        self::assertSame('QmHash', $state->publish->cid);
+        self::assertNotNull($state->publish->websiteId);
+        self::assertNotNull($state->publish->ipnsKey);
+
+        // The explicit state survives the persist/rehydrate round trip.
+        self::assertSame(
+            PublishBoundaryStatus::AwaitingDns,
+            PublishBoundaryResult::fromArray($state->publish->toArray())->status,
+        );
     }
 
     public function testRequiresASuccessfulProbeFirst(): void
