@@ -19,10 +19,14 @@ use LumeWeb\Cast\Admin\WordPressPublishedContentProbe;
  *    are ignored unless a published item becomes unavailable.
  *
  * The transition gate consults a {@see PublishedContentProbe} (the WordPress
- * probe by default, injectable in tests): while it answers that no
- * publish-eligible public content exists — e.g. a fresh install whose only
- * published items are the WordPress factory defaults — a publish-relevant
- * transition is ignored (never marked/scheduled).
+ * probe by default, injectable in tests) for ENTERING-publish transitions
+ * only: while it answers that no publish-eligible public content exists —
+ * e.g. a fresh install whose only published items are the WordPress factory
+ * defaults — an entering-publish transition is ignored (never
+ * marked/scheduled). Leaving-publish transitions (unpublish/trash) are never
+ * gated: the probe queries the site after the transition, so trashing the
+ * last genuine post would answer "no eligible content" and the removal would
+ * never be exported.
  *
  * The save-path callback only marks/schedules through the pure scheduler; no
  * heavy work runs inside the post-save hook. Only actions are registered — no
@@ -74,9 +78,10 @@ final class JobsHookSubscriber implements HookSubscriber
         private readonly int $deferredRearmDelaySeconds = self::DEFAULT_DEFERRED_REARM_DELAY_SECONDS,
         // Content-eligibility gate for the transition hook: answers whether
         // the site has publish-eligible public content beyond the WordPress
-        // factory defaults, so a fresh install's factory post/page transitions
-        // never reach the scheduler. Defaults to the real WordPress probe;
-        // injectable so tests can script the site's published content.
+        // factory defaults, so a fresh install's entering-publish
+        // transitions on the factory post/page never reach the scheduler.
+        // Defaults to the real WordPress probe; injectable so tests can
+        // script the site's published content.
         private readonly PublishedContentProbe $contentProbe = new WordPressPublishedContentProbe(),
     ) {
     }
@@ -256,10 +261,14 @@ final class JobsHookSubscriber implements HookSubscriber
         }
 
         // A fresh WordPress install fires this hook for the factory-default
-        // "Hello world!" post and "Sample Page" page, which are not user
-        // content: while the probe sees nothing beyond the factory defaults,
-        // the transition must not reach the scheduler at all.
-        if (!$this->contentProbe->hasEligibleContent()) {
+        // "Hello world!" post and "Sample Page" page as they ENTER publish,
+        // which are not user content: while the probe sees nothing beyond the
+        // factory defaults, an entering-publish transition must not reach the
+        // scheduler at all. Leaving-publish transitions (unpublish/trash) are
+        // deliberately NOT gated: the probe runs after the transition, so
+        // trashing the last genuine post would answer "no eligible content"
+        // and the removal would never be exported.
+        if ($newStatus === 'publish' && !$this->contentProbe->hasEligibleContent()) {
             return;
         }
 

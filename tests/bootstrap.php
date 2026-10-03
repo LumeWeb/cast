@@ -563,6 +563,10 @@ $GLOBALS['lumeweb_cast_has_publishable_content'] = false;
 // when set (even to []) it is the source of truth so tests can express exactly
 // which titles are published (e.g. only the WordPress factory defaults).
 $GLOBALS['lumeweb_cast_get_posts_titles'] = null;
+// A scripted id=>post_type map for the get_posts() rows; an id absent from the
+// map defaults to 'post'. Lets a test express the factory page (id 2, 'page')
+// beside the factory post (id 1, 'post') exactly as a fresh install ships it.
+$GLOBALS['lumeweb_cast_get_posts_types'] = [];
 // The i18n translation table the __() shim consults, keyed "domain|text". Empty
 // means no active translation, so __() returns the original string exactly like
 // core does with no language pack loaded.
@@ -606,11 +610,11 @@ function get_post_types(array $args = [], string $output = 'names'): array
 /**
  * Minimal get_posts() shim driven by a global so the publishable-content probe
  * is testable. When `lumeweb_cast_get_posts_titles` is set (even to []) it is
- * the source of truth: the shim returns WP_Post-like objects (with `ID` and
- * `post_title` properties) exactly as real WordPress does — it does NOT return
- * an id=>title map. When it is null the shim falls back to the boolean
- * `lumeweb_cast_has_publishable_content` (a single genuine user post, never a
- * factory default) so the legacy "has content" tests keep their shape.
+ * the source of truth: the shim returns WP_Post-like objects (with `ID`,
+ * `post_type` and `post_title` properties) exactly as real WordPress does — it
+ * does NOT return an id=>title map. When it is null the shim falls back to the
+ * boolean `lumeweb_cast_has_publishable_content` (a single genuine user post,
+ * never a factory default) so the legacy "has content" tests keep their shape.
  * The recorded args let tests assert what the probe actually queried.
  *
  * @param array<string, mixed>|null $args
@@ -623,13 +627,17 @@ function get_posts(array $args = null): array
     $titles = $GLOBALS['lumeweb_cast_get_posts_titles'] ?? null;
     if ($titles === null) {
         return ($GLOBALS['lumeweb_cast_has_publishable_content'] ?? false)
-            ? [(object) ['ID' => 123, 'post_title' => 'My first post']]
+            ? [(object) ['ID' => 123, 'post_type' => 'post', 'post_title' => 'My first post']]
             : [];
     }
 
     // Real WordPress get_posts() returns WP_Post objects, not an id=>title map.
     return array_map(
-        static fn (int|string $id, string $title): object => (object) ['ID' => is_int($id) ? $id : 0, 'post_title' => $title],
+        static fn (int|string $id, string $title): object => (object) [
+            'ID' => is_int($id) ? $id : 0,
+            'post_type' => $GLOBALS['lumeweb_cast_get_posts_types'][$id] ?? 'post',
+            'post_title' => $title,
+        ],
         array_keys($titles),
         array_values($titles)
     );

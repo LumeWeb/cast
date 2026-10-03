@@ -80,6 +80,7 @@ final class JobsHookSubscriberTest extends TestCase
         // these tests exercise; a test scripting its own title map overrides
         // this per-test.
         $GLOBALS['lumeweb_cast_has_publishable_content'] = true;
+        $GLOBALS['lumeweb_cast_get_posts_types'] = [];
 
         $runner = new ExportTickRunner(
             clock: $this->clock,
@@ -119,6 +120,7 @@ final class JobsHookSubscriberTest extends TestCase
         // Never leak scripted site content into the next test: the probe
         // (and therefore the transition gate) must see a clean slate.
         $GLOBALS['lumeweb_cast_get_posts_titles'] = null;
+        $GLOBALS['lumeweb_cast_get_posts_types'] = [];
         $GLOBALS['lumeweb_cast_has_publishable_content'] = false;
     }
 
@@ -544,6 +546,7 @@ final class JobsHookSubscriberTest extends TestCase
         // Exactly the two factory-default titles and nothing else — a brand
         // new, content-less site, exactly what a fresh install publishes.
         $GLOBALS['lumeweb_cast_get_posts_titles'] = [1 => 'Hello world!', 2 => 'Sample Page'];
+        $GLOBALS['lumeweb_cast_get_posts_types'] = [1 => 'post', 2 => 'page'];
 
         // The factory post's own publish transition, exactly what a fresh
         // install fires; the standard fixture subscriber (unchanged public
@@ -569,6 +572,10 @@ final class JobsHookSubscriberTest extends TestCase
             2 => 'Sample Page',
             123 => 'My first post',
         ];
+        $GLOBALS['lumeweb_cast_get_posts_types'] = [
+            1 => 'post',
+            2 => 'page',
+        ];
 
         $this->subscriber->onPostTransition('publish', 'draft', $this->post());
 
@@ -576,6 +583,42 @@ final class JobsHookSubscriberTest extends TestCase
         self::assertNotNull($latest, 'a publish-relevant user-content transition must create a run');
         self::assertTrue($latest->dirty);
         self::assertTrue($this->scheduler->isScheduled(ContentPublishScheduler::AUTO_HOOK));
+    }
+
+    /**
+     * Leaving-publish transitions (unpublish/trash) must reach the scheduler
+     * even when the probe now sees no eligible content: trashing the last
+     * genuine post leaves only the factory defaults in the probe's view, and
+     * the removal must still be exported. The eligibility gate applies to
+     * entering-publish transitions only — never to leaving-publish ones.
+     *
+     * @param string $newStatus
+     * @param string $oldStatus
+     */
+    #[DataProvider('leavingPublishTransitions')]
+    public function testLeavingPublishTransitionSchedulesEvenWhenProbeSeesNoEligibleContent(string $newStatus, string $oldStatus): void
+    {
+        // The probe sees only the two factory defaults: the genuine post left
+        // publish, which is exactly why this transition is firing.
+        $GLOBALS['lumeweb_cast_get_posts_titles'] = [1 => 'Hello world!', 2 => 'Sample Page'];
+        $GLOBALS['lumeweb_cast_get_posts_types'] = [1 => 'post', 2 => 'page'];
+
+        $this->subscriber->onPostTransition($newStatus, $oldStatus, $this->post());
+
+        self::assertNotNull($this->repository->latest(), sprintf('%s → %s must create a run', $oldStatus, $newStatus));
+        self::assertTrue($this->repository->latest()->dirty, sprintf('%s → %s should mark dirty', $oldStatus, $newStatus));
+        self::assertTrue($this->scheduler->isScheduled(ContentPublishScheduler::AUTO_HOOK), sprintf('%s → %s must schedule a tick', $oldStatus, $newStatus));
+    }
+
+    /**
+     * @return array<string, array{string, string}>
+     */
+    public static function leavingPublishTransitions(): array
+    {
+        return [
+            'publish to draft (unpublish)' => ['draft', 'publish'],
+            'publish to trash' => ['trash', 'publish'],
+        ];
     }
 
     public function testPublishingMarksContentDirtyAndSchedules(): void

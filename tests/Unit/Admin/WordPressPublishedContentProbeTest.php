@@ -14,6 +14,7 @@ final class WordPressPublishedContentProbeTest extends TestCase
         $GLOBALS['lumeweb_cast_has_publishable_content'] = false;
         $GLOBALS['lumeweb_cast_get_posts_args'] = [];
         $GLOBALS['lumeweb_cast_get_posts_titles'] = null;
+        $GLOBALS['lumeweb_cast_get_posts_types'] = [];
         $GLOBALS['lumeweb_cast_translations'] = [];
     }
 
@@ -32,6 +33,10 @@ final class WordPressPublishedContentProbeTest extends TestCase
             1 => 'Hello world!',
             2 => 'Sample Page',
         ];
+        $GLOBALS['lumeweb_cast_get_posts_types'] = [
+            1 => 'post',
+            2 => 'page',
+        ];
 
         self::assertFalse((new WordPressPublishedContentProbe())->hasEligibleContent());
     }
@@ -44,6 +49,33 @@ final class WordPressPublishedContentProbeTest extends TestCase
             1 => 'Hello world!',
             2 => 'Sample Page',
             3 => 'My real post',
+        ];
+        $GLOBALS['lumeweb_cast_get_posts_types'] = [
+            1 => 'post',
+            2 => 'page',
+        ];
+
+        self::assertTrue((new WordPressPublishedContentProbe())->hasEligibleContent());
+    }
+
+    public function testGenuineUserContentWithFactoryTitlesRemainsEligible(): void
+    {
+        // A genuine user post titled EXACTLY like a factory default is not the
+        // factory content: it carries a later auto-increment ID. Identifying
+        // the factory items structurally (post ID 1 / page ID 2) must keep
+        // this real content eligible — title equality must not filter it out,
+        // which would block the first publish on a fresh site.
+        $GLOBALS['lumeweb_cast_get_posts_titles'] = [
+            1 => 'Hello world!',
+            2 => 'Sample Page',
+            7 => 'Hello world!',
+            8 => 'Sample Page',
+        ];
+        $GLOBALS['lumeweb_cast_get_posts_types'] = [
+            1 => 'post',
+            2 => 'page',
+            7 => 'post',
+            8 => 'page',
         ];
 
         self::assertTrue((new WordPressPublishedContentProbe())->hasEligibleContent());
@@ -60,6 +92,10 @@ final class WordPressPublishedContentProbeTest extends TestCase
         $GLOBALS['lumeweb_cast_get_posts_titles'] = [
             1 => 'Bonjour le monde !',
             2 => "Page d'exemple",
+        ];
+        $GLOBALS['lumeweb_cast_get_posts_types'] = [
+            1 => 'post',
+            2 => 'page',
         ];
 
         self::assertFalse((new WordPressPublishedContentProbe())->hasEligibleContent());
