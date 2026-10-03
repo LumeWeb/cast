@@ -229,6 +229,28 @@ final class ExportRun
         return $this->status->isTerminal();
     }
 
+    /**
+     * Whether this run is positioned at the capture stage.
+     *
+     * Capture workers read this before touching the queue. Only the
+     * coordinator tick moves the cursor between stage positions, so a
+     * false answer means the run left capture and the worker must not claim.
+     */
+    public function isAtCaptureStage(): bool
+    {
+        if ($this->status !== RunStatus::Running || $this->stage !== RunStage::Exporting) {
+            return false;
+        }
+
+        if ($this->resumeCursor === '') {
+            return false;
+        }
+
+        $pieces = explode('|', $this->resumeCursor, 2);
+
+        return PipelineStageKey::tryFrom($pieces[0]) === PipelineStageKey::Capture;
+    }
+
     public function retriesRemaining(): int
     {
         return max(0, $this->settings->maxRetries - $this->retryCount);

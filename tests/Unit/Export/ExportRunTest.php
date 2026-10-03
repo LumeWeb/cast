@@ -279,6 +279,32 @@ final class ExportRunTest extends TestCase
         ];
     }
 
+    #[DataProvider('captureStagePositionProvider')]
+    public function testIsAtCaptureStageOnlyForARunningRunPositionedAtCapture(string $label, RunStatus $status, RunStage $stage, string $cursor, bool $expected): void
+    {
+        $run = new ExportRun('run-1', $status, $stage, resumeCursor: $cursor);
+
+        self::assertSame($expected, $run->isAtCaptureStage(), $label);
+    }
+
+    /**
+     * @return iterable<string, array{string, RunStatus, RunStage, string, bool}>
+     */
+    public static function captureStagePositionProvider(): iterable
+    {
+        yield 'running at the capture boundary' => ['running at the capture boundary', RunStatus::Running, RunStage::Exporting, 'capture|', true];
+        yield 'running at capture with a stage cursor' => ['running at capture with a stage cursor', RunStatus::Running, RunStage::Exporting, 'capture|42', true];
+        yield 'running at probe' => ['running at probe', RunStatus::Running, RunStage::Exporting, 'probe|', false];
+        yield 'running at discover' => ['running at discover', RunStatus::Running, RunStage::Exporting, 'discover|', false];
+        yield 'running at rewrite' => ['running at rewrite', RunStatus::Running, RunStage::Exporting, 'rewrite|', false];
+        yield 'running, exporting bucket, no cursor yet' => ['running, exporting bucket, no cursor yet', RunStatus::Running, RunStage::Exporting, '', false];
+        yield 'running, unparseable cursor' => ['running, unparseable cursor', RunStatus::Running, RunStage::Exporting, 'garbage|', false];
+        yield 'running in the uploading bucket' => ['running in the uploading bucket', RunStatus::Running, RunStage::Uploading, 'capture|', false];
+        yield 'paused at capture' => ['paused at capture', RunStatus::Paused, RunStage::Exporting, 'capture|', false];
+        yield 'not started' => ['not started', RunStatus::NotStarted, RunStage::Idle, '', false];
+        yield 'completed' => ['completed', RunStatus::Completed, RunStage::Finished, 'capture|', false];
+    }
+
     public function testCompleteWithWarningsRequiresRecordedWarnings(): void
     {
         $run = ExportRun::create('run-1', $this->settings(), at: 1000);
