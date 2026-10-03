@@ -22,7 +22,9 @@ use LumeWeb\Cast\Jobs\InMemoryPublishModeStore;
 use LumeWeb\Cast\Jobs\InMemoryScheduler;
 use LumeWeb\Cast\Onboarding\Wizard;
 use LumeWeb\Cast\Onboarding\WizardState;
+use LumeWeb\Cast\Publish\WordPressPublishDestinationStore;
 use LumeWeb\Cast\Tests\Unit\Onboarding\FakeWizardStore;
+use LumeWeb\Cast\Tests\Unit\Persistence\FakeOptionGateway;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -54,7 +56,7 @@ final class PublishRestRouteRegistrarTest extends TestCase
         );
     }
 
-    private function setupService(): PublishSetupService
+    private function setupService(?WordPressPublishDestinationStore $destinationStore = null): PublishSetupService
     {
         $reader = new class implements EnvReader {
             public function get(string $name): string|false
@@ -83,10 +85,26 @@ final class PublishRestRouteRegistrarTest extends TestCase
                 identity: new InMemoryIdentityGateway(),
                 modeStore: $modeStore,
                 workItems: new InMemoryWorkItemRepository(),
+                destinationStore: $destinationStore ?? self::confirmedDestinationStore(),
             ),
             modeStore: $modeStore,
             clock: $clock,
+            // A confirmed destination so the first-publish route stays a
+            // first publish (the gate requires a confirmed choice).
+            destinationStore: $destinationStore ?? self::confirmedDestinationStore(),
         );
+    }
+
+    /**
+     * @return WordPressPublishDestinationStore
+     */
+    private static function confirmedDestinationStore(): WordPressPublishDestinationStore
+    {
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $store->saveDraft(\LumeWeb\Cast\Publish\PublishDestination::platformGenerated());
+        $store->confirm(\LumeWeb\Cast\Publish\PublishDestination::platformGenerated());
+
+        return $store;
     }
 
     /**
@@ -125,7 +143,7 @@ final class PublishRestRouteRegistrarTest extends TestCase
 
         $routes = $GLOBALS['lumeweb_cast_rest_routes'];
         self::assertIsArray($routes);
-        self::assertCount(9, $routes);
+        self::assertCount(11, $routes);
 
         $status = $this->route(PublishRestRouteRegistrar::STATUS_ROUTE);
         self::assertSame(PublishRestRouteRegistrar::NAMESPACE, $status[0]);
@@ -162,6 +180,14 @@ final class PublishRestRouteRegistrarTest extends TestCase
         $websiteLink = $this->route(PublishRestRouteRegistrar::WEBSITE_LINK_ROUTE);
         self::assertSame(PublishRestRouteRegistrar::NAMESPACE, $websiteLink[0]);
         self::assertSame('POST', $websiteLink[2]['methods']);
+
+        $destination = $this->route(PublishRestRouteRegistrar::DESTINATION_ROUTE);
+        self::assertSame(PublishRestRouteRegistrar::NAMESPACE, $destination[0]);
+        self::assertSame('GET, POST', $destination[2]['methods']);
+
+        $destinationConfirm = $this->route(PublishRestRouteRegistrar::DESTINATION_CONFIRM_ROUTE);
+        self::assertSame(PublishRestRouteRegistrar::NAMESPACE, $destinationConfirm[0]);
+        self::assertSame('POST', $destinationConfirm[2]['methods']);
     }
 
     public function testRoutesWireTypedCallbacksAndPermissionCallbacks(): void
@@ -212,6 +238,16 @@ final class PublishRestRouteRegistrarTest extends TestCase
         self::assertSame([$this->registrar, 'canLinkWebsite'], $websiteLink[2]['permission_callback']);
         $websiteLinkCallback = $websiteLink[2]['callback'];
         self::assertIsCallable($websiteLinkCallback);
+
+        $destination = $this->route(PublishRestRouteRegistrar::DESTINATION_ROUTE);
+        self::assertSame([$this->registrar, 'canManageDestination'], $destination[2]['permission_callback']);
+        $destinationCallback = $destination[2]['callback'];
+        self::assertIsCallable($destinationCallback);
+
+        $destinationConfirm = $this->route(PublishRestRouteRegistrar::DESTINATION_CONFIRM_ROUTE);
+        self::assertSame([$this->registrar, 'canManageDestination'], $destinationConfirm[2]['permission_callback']);
+        $destinationConfirmCallback = $destinationConfirm[2]['callback'];
+        self::assertIsCallable($destinationConfirmCallback);
     }
 
     public function testWebsiteRoutePermissionsRequireManageOptionsAndRestNonce(): void
@@ -281,24 +317,109 @@ final class PublishRestRouteRegistrarTest extends TestCase
         self::assertSame('not_awaiting_website', $payload['refusal']);
     }
 
+    public function testDestinationRoutePermissionsRequireManageOptionsAndRestNonce(): void
+    {
+        $this->registrar->register();
+
+        $this->auth->allowed = false;
+        self::assertFalse($this->registrar->canManageDestination());
+
+        // With the capability granted the nonce is consulted and guards too.
+        $this->auth->allowed = true;
+        $this->auth->validNonce = false;
+        self::assertFalse($this->registrar->canManageDestination());
+
+        // Both checks recorded: manage_options capability + wp_rest nonce.
+        self::assertSame(2, count(array_values(array_filter(
+            $this->auth->checkedCapabilities,
+            static fn (string $capability): bool => $capability === 'manage_options',
+        ))));
+        self::assertSame(['wp_rest'], $this->auth->checkedNonceActions);
+    }
+
+    public function testDestinationSaveCallbackParsesOnlyAllowlistedFields(): void
+    {
+        // A registrar over a FRESH (empty) destination store: the save
+        // surface is what is under test here, not the confirmed fixture the
+        // shared registrar carries.
+        $registrar = new PublishRestRouteRegistrar(
+            new PublishRestHandler($this->setupService(new WordPressPublishDestinationStore(new FakeOptionGateway()))),
+            $this->auth,
+        );
+        $registrar->register();
+
+        $save = $this->route(PublishRestRouteRegistrar::DESTINATION_ROUTE);
+        $saveCallback = $save[2]['callback'];
+        // The registrar's destination parser reads params defensively from any
+        // object with get_param, so the annotated parameter is the request
+        // double the test passes (an object), not a concrete WP_REST_Request.
+        /** @var callable(object): array<string, mixed> $saveCallback */
+        self::assertIsCallable($saveCallback);
+
+        // A legal custom-domain choice plus a forged extra field: the extra
+        // field is dropped and the save succeeds with the allowlisted shape.
+        $payload = $saveCallback($this->restRequest([
+            'source' => 'custom', 'domain' => 'example.com', 'namespace' => 'icann',
+            'dns_hosting_enabled' => true, 'evil' => 'injected',
+        ]));
+        self::assertTrue($payload['saved']);
+        self::assertSame('draft', $payload['lifecycle']);
+
+        // Only non-allowlisted fields: nothing legal to parse, refused with
+        // the fixed code before the store is touched.
+        $payload = $saveCallback($this->restRequest(['evil' => 'injected']));
+        self::assertFalse($payload['saved']);
+        self::assertSame('invalid_input', $payload['refusal']);
+    }
+
+    public function testDestinationConfirmCallbackParsesAllowlistedFields(): void
+    {
+        $this->registrar->register();
+
+        $confirm = $this->route(PublishRestRouteRegistrar::DESTINATION_CONFIRM_ROUTE);
+        $confirmCallback = $confirm[2]['callback'];
+        /** @var callable(object): array<string, mixed> $confirmCallback */
+        self::assertIsCallable($confirmCallback);
+
+        // The setup service's store already holds a confirmed platform
+        // destination (the fixture): confirming an UNCHANGED choice is
+        // idempotent, confirming a changed one is refused with the fixed
+        // code, and a corrupt shape is refused invalid_input.
+        $payload = $confirmCallback($this->restRequest(['source' => 'platform', 'generate' => true]));
+        self::assertTrue($payload['confirmed']);
+        self::assertSame('confirmed', $payload['lifecycle']);
+
+        $payload = $confirmCallback($this->restRequest(['source' => 'platform', 'label' => 'other-site']));
+        self::assertFalse($payload['confirmed']);
+        self::assertSame('confirmed_cannot_change', $payload['refusal']);
+
+        $payload = $confirmCallback($this->restRequest(['source' => 'carrier-pigeon']));
+        self::assertFalse($payload['confirmed']);
+        self::assertSame('invalid_input', $payload['refusal']);
+    }
+
     /**
-     * A minimal WP_REST_Request double exposing get_param for the registrar's
-     * defensive param readers.
+     * A minimal WP_REST_Request double exposing get_param (and get_method for
+     * the destination route's GET/POST branch) for the registrar's defensive
+     * param readers.
      *
      * @param array<string, mixed> $params
      */
-    private function restRequest(array $params): object
+    private function restRequest(array $params, string $method = 'POST'): object
     {
-        return new class ($params) {
+        return new class ($params, $method) {
             /** @var array<string, mixed> */
             private array $params;
+
+            private string $method;
 
             /**
              * @param array<string, mixed> $params
              */
-            public function __construct(array $params)
+            public function __construct(array $params, string $method)
             {
                 $this->params = $params;
+                $this->method = $method;
             }
 
             // Snake_case mirrors the WordPress WP_REST_Request API surface;
@@ -307,6 +428,11 @@ final class PublishRestRouteRegistrarTest extends TestCase
             public function get_param(string $name): mixed
             {
                 return $this->params[$name] ?? null;
+            }
+
+            public function get_method(): string
+            {
+                return $this->method;
             }
             // phpcs:enable PSR1.Methods.CamelCapsMethodName
         };

@@ -43,6 +43,18 @@ final class PublishBoundaryResult
         return new self(PublishBoundaryStatus::Resumable, $cid, $websiteId, $ipnsKey, $message);
     }
 
+    /**
+     * The explicit custom-domain DNS-wait park: the website was created and
+     * the run pauses until the domain's DNS connects. Deliberately its own
+     * persisted status, not a generic resumable failure — a normal DNS wait
+     * is a waiting state, and its resume is the verified-DNS artifact replay,
+     * never an automatic retry.
+     */
+    public static function awaitingDns(string $cid, string $websiteId, string $ipnsKey, string $message): self
+    {
+        return new self(PublishBoundaryStatus::AwaitingDns, $cid, $websiteId, $ipnsKey, $message);
+    }
+
     public function isSuccess(): bool
     {
         return $this->status === PublishBoundaryStatus::Completed;

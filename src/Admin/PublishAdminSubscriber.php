@@ -98,9 +98,16 @@ final class PublishAdminSubscriber implements HookSubscriber
         // nothing about domains leaks into the page (graceful null). The panel
         // is fed the onboarding terminal state so it can tell "finish
         // onboarding" apart from "publish your site first" — the two setup
-        // states have different honest next steps.
+        // states have different honest next steps — and the selected
+        // destination's own domain (custom destinations only), so the panel
+        // scopes its DNS/SSL reads to the domain the workflow manages rather
+        // than implicitly adopting the first listed one.
         if ($this->domains !== null) {
-            $data['domainView'] = $this->domains->dashboard($this->status()->onboardingComplete);
+            $status = $this->status();
+            $data['domainView'] = $this->domains->dashboard(
+                $status->onboardingComplete,
+                $this->destinationDomainForPanel($status),
+            );
         }
 
         $this->views->render('publish.php', $data);
@@ -267,6 +274,30 @@ final class PublishAdminSubscriber implements HookSubscriber
     }
 
     /**
+     * The domain the domain panel scopes its DNS/SSL reads to: the
+     * destination's own domain, and only for an explicit custom destination
+     * (platform and existing-site destinations never receive registrar/DNS
+     * setup, so they pass no domain at all). A missing or empty domain yields
+     * null, in which case the panel selects no domain — it never falls back
+     * to the first listed one.
+     */
+    private function destinationDomainForPanel(PublishStatus $status): ?string
+    {
+        $destination = $status->destination?->destination;
+        if (!is_array($destination)) {
+            return null;
+        }
+
+        if (($destination['source'] ?? null) !== 'custom') {
+            return null;
+        }
+
+        $domain = $destination['domain'] ?? null;
+
+        return is_string($domain) && trim($domain) !== '' ? $domain : null;
+    }
+
+    /**
      * The current publish status, computed at most once per request.
      *
      * The page render, admin bar, notice and script gating all read the same
@@ -377,14 +408,16 @@ final class PublishAdminSubscriber implements HookSubscriber
                 'maxAttempts' => self::POLL_MAX_ATTEMPTS,
                 'backoffMs' => self::POLL_BACKOFF_MS,
             ],
-            // The guided website card: the create/available/link routes plus a
-            // tight website_actions allowlist, localized unconditionally like
-            // the publish endpoints (the card only renders while awaiting a
-            // website, and every call is still gated by nonce + allowlist).
-            'website_actions' => [
-                'website_create',
+            // The address wizard's destination routes: reading and writing the
+            // durable publish destination plus the confirm step, localized
+            // unconditionally like the publish endpoints (the wizard only
+            // renders before the first publish, and every call is still gated
+            // by nonce + allowlist).
+            'destination_actions' => [
+                'destination_get',
+                'destination_save',
+                'destination_confirm',
                 'website_available',
-                'website_link',
             ],
             // The queued ETA's tick delivery cadence, localized from the same
             // constant PublishDashboardView derives the server-rendered
@@ -480,9 +513,10 @@ final class PublishAdminSubscriber implements HookSubscriber
      *     mode: string,
      *     cancel: string,
      *     artifact: string,
-     *     website_create: string,
-     *     website_available: string,
-     *     website_link: string
+     *     destination_get: string,
+     *     destination_save: string,
+     *     destination_confirm: string,
+     *     website_available: string
      * }
      */
     private function publishEndpoints(): array
@@ -494,9 +528,10 @@ final class PublishAdminSubscriber implements HookSubscriber
             'mode' => rest_url(PublishRestRouteRegistrar::NAMESPACE . PublishRestRouteRegistrar::MODE_ROUTE),
             'cancel' => rest_url(PublishRestRouteRegistrar::NAMESPACE . PublishRestRouteRegistrar::CANCEL_ROUTE),
             'artifact' => rest_url(PublishRestRouteRegistrar::NAMESPACE . PublishRestRouteRegistrar::ARTIFACT_ROUTE),
-            'website_create' => rest_url(PublishRestRouteRegistrar::NAMESPACE . PublishRestRouteRegistrar::WEBSITE_CREATE_ROUTE),
+            'destination_get' => rest_url(PublishRestRouteRegistrar::NAMESPACE . PublishRestRouteRegistrar::DESTINATION_ROUTE),
+            'destination_save' => rest_url(PublishRestRouteRegistrar::NAMESPACE . PublishRestRouteRegistrar::DESTINATION_ROUTE),
+            'destination_confirm' => rest_url(PublishRestRouteRegistrar::NAMESPACE . PublishRestRouteRegistrar::DESTINATION_CONFIRM_ROUTE),
             'website_available' => rest_url(PublishRestRouteRegistrar::NAMESPACE . PublishRestRouteRegistrar::WEBSITE_AVAILABLE_ROUTE),
-            'website_link' => rest_url(PublishRestRouteRegistrar::NAMESPACE . PublishRestRouteRegistrar::WEBSITE_LINK_ROUTE),
         ];
     }
 

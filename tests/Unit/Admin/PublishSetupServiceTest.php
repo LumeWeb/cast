@@ -7,6 +7,7 @@ namespace LumeWeb\Cast\Tests\Unit\Admin;
 use GuzzleHttp\Psr7\Response;
 use LumeWeb\Cast\Admin\ConnectionResolver;
 use LumeWeb\Cast\Admin\PublishCancelRefusal;
+use LumeWeb\Cast\Admin\PublishDestinationRefusal;
 use LumeWeb\Cast\Admin\PublishExistingRefusal;
 use LumeWeb\Cast\Admin\PublishModeRefusal;
 use LumeWeb\Cast\Admin\PublishSetupService;
@@ -52,7 +53,13 @@ use LumeWeb\Cast\Jobs\PublishModeStore;
 use LumeWeb\Cast\Jobs\WordPressIdentityGateway;
 use LumeWeb\Cast\Onboarding\Wizard;
 use LumeWeb\Cast\Onboarding\WizardState;
+use LumeWeb\Cast\Publish\Domain;
+use LumeWeb\Cast\Publish\DomainClient;
+use LumeWeb\Cast\Publish\DomainClientException;
+use LumeWeb\Cast\Publish\PublishDestination;
+use LumeWeb\Cast\Publish\PublishDestinationLifecycle;
 use LumeWeb\Cast\Publish\PublishRegistry;
+use LumeWeb\Cast\Publish\WordPressPublishDestinationStore;
 use LumeWeb\Cast\Publish\WordPressPublishRegistry;
 use LumeWeb\Cast\Tests\Unit\Onboarding\FakeWizardStore;
 use LumeWeb\Cast\Tests\Unit\Persistence\FakeOptionGateway;
@@ -131,6 +138,8 @@ final class PublishSetupServiceTest extends TestCase
         ?IpnsResolver $ipns = null,
         ?WorkspaceLinker $workspaces = null,
         ?IdentityGateway $identity = null,
+        ?WordPressPublishDestinationStore $destinationStore = null,
+        ?DomainClient $domains = null,
     ): PublishSetupService {
         $modeStore ??= new InMemoryPublishModeStore();
         $identity ??= $this->identity;
@@ -148,6 +157,10 @@ final class PublishSetupServiceTest extends TestCase
                 identity: $identity,
                 modeStore: $modeStore,
                 workItems: new InMemoryWorkItemRepository(),
+                // The same store the service gates on: the scheduler
+                // snapshots the confirmed destination into fresh run
+                // settings through this composition (mirroring production).
+                destinationStore: $destinationStore,
             ),
             modeStore: $modeStore,
             clock: $this->clock,
@@ -157,7 +170,24 @@ final class PublishSetupServiceTest extends TestCase
             registry: $registry,
             workspaces: $workspaces,
             ipns: $ipns,
+            destinationStore: $destinationStore,
+            domains: $domains,
         );
+    }
+
+    /**
+     * A real destination store over an in-memory option table (the same
+     * WordPressPublishDestinationStore production composes), optionally
+     * pre-seeded with a confirmed (or created/attached) choice.
+     */
+    private function destinationStore(?PublishDestination $confirmed = null): WordPressPublishDestinationStore
+    {
+        $confirmed ??= PublishDestination::platformGenerated();
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $store->saveDraft($confirmed);
+        $store->confirm($confirmed);
+
+        return $store;
     }
 
     /**
@@ -265,6 +295,25 @@ final class PublishSetupServiceTest extends TestCase
 
         $this->wizardStore->stored = new Wizard(state: WizardState::Building);
         self::assertFalse($this->service()->status()->onboardingComplete);
+    }
+
+    public function testStatusReportsSkippedOnboardingDistinctlyFromIncomplete(): void
+    {
+        // An explicitly skipped onboarding is still terminal (the publish
+        // gates are unchanged) AND reported as skipped: the copy layer must
+        // never instruct a skipped user to "finish onboarding".
+        $this->wizardStore->stored = new Wizard(state: WizardState::Skipped);
+        $skipped = $this->service()->status();
+        self::assertTrue($skipped->onboardingComplete);
+        self::assertTrue($skipped->onboardingSkipped);
+        self::assertTrue($skipped->toArray()['onboarding_skipped']);
+
+        // An incomplete (in-flight) onboarding is NOT skipped.
+        $this->wizardStore->stored = new Wizard(state: WizardState::Building);
+        $incomplete = $this->service()->status();
+        self::assertFalse($incomplete->onboardingComplete);
+        self::assertFalse($incomplete->onboardingSkipped);
+        self::assertFalse($incomplete->toArray()['onboarding_skipped']);
     }
 
     public function testStatusReportsPublishableContentReadiness(): void
@@ -807,7 +856,312 @@ final class PublishSetupServiceTest extends TestCase
         self::assertStringNotContainsString('https://cast.example.test', $json);
     }
 
+    /* ------------------------- destination setup ------------------------- */
+
+    public function testSaveDestinationStoresDraftsForEachSource(): void
+    {
+        // Each case: [request input, canonical stored array] — the read-back
+        // is the destination's full 9-field serialization, not the request.
+        $cases = [
+            'platform generated' => [
+                ['source' => 'platform', 'generate' => true],
+                ['source' => 'platform', 'domain' => null, 'namespace' => null, 'dns_hosting_enabled' => true, 'platform_domain' => null, 'platform_namespace' => null, 'generate' => true, 'label' => null, 'website_id' => null],
+            ],
+            'platform labelled' => [
+                ['source' => 'platform', 'label' => 'my-site'],
+                ['source' => 'platform', 'domain' => null, 'namespace' => null, 'dns_hosting_enabled' => true, 'platform_domain' => null, 'platform_namespace' => null, 'generate' => false, 'label' => 'my-site', 'website_id' => null],
+            ],
+            'custom icann managed dns' => [
+                ['source' => 'custom', 'domain' => 'example.com', 'namespace' => 'icann', 'dns_hosting_enabled' => true],
+                ['source' => 'custom', 'domain' => 'example.com', 'namespace' => 'icann', 'dns_hosting_enabled' => true, 'platform_domain' => null, 'platform_namespace' => null, 'generate' => false, 'label' => null, 'website_id' => null],
+            ],
+            'custom hns self-managed dns' => [
+                ['source' => 'custom', 'domain' => 'example.hns', 'namespace' => 'hns', 'dns_hosting_enabled' => false],
+                ['source' => 'custom', 'domain' => 'example.hns', 'namespace' => 'hns', 'dns_hosting_enabled' => false, 'platform_domain' => null, 'platform_namespace' => null, 'generate' => false, 'label' => null, 'website_id' => null],
+            ],
+            'existing website' => [
+                ['source' => 'existing', 'website_id' => 'web-42'],
+                ['source' => 'existing', 'domain' => null, 'namespace' => null, 'dns_hosting_enabled' => true, 'platform_domain' => null, 'platform_namespace' => null, 'generate' => false, 'label' => null, 'website_id' => 'web-42'],
+            ],
+        ];
+
+        foreach ($cases as $label => [$input, $expected]) {
+            $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+            $result = $this->service(destinationStore: $store)->saveDestination($input);
+
+            self::assertTrue($result->saved, "$label must save");
+            self::assertNull($result->refusal, "$label must not refuse");
+            self::assertSame('draft', $result->lifecycle, "$label must persist as a draft");
+
+            $view = $this->service(destinationStore: $store)->readDestination();
+            self::assertSame('draft', $view->lifecycle, "$label read-back lifecycle");
+            self::assertSame($expected, $view->destination, "$label read-back fields");
+        }
+    }
+
+    public function testSaveDestinationRefusesInvalidInputSideEffectFree(): void
+    {
+        $invalidInputs = [
+            ['source' => 'carrier-pigeon'],                                   // unknown source
+            ['source' => 'custom', 'domain' => 'example.com'],                 // missing namespace
+            ['source' => 'custom', 'domain' => 'example.com', 'namespace' => 'pigeon'], // bad namespace
+            ['source' => 'custom', 'domain' => 'example.com', 'namespace' => 'icann'],   // missing explicit DNS mode
+            ['source' => 'platform', 'generate' => true, 'domain' => 'example.com'],     // impossible combination
+            ['source' => 'platform', 'label' => ''],                            // empty label
+            ['source' => 'existing'],                                           // missing website id
+            [],                                                                 // nothing at all
+        ];
+
+        foreach ($invalidInputs as $input) {
+            $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+            $result = $this->service(destinationStore: $store)->saveDestination($input);
+
+            self::assertFalse($result->saved, 'input ' . json_encode($input) . ' must not save');
+            self::assertSame(PublishDestinationRefusal::InvalidInput, $result->refusal);
+            self::assertNull($store->read(), 'a refused save must not persist anything');
+        }
+    }
+
+    public function testSaveDestinationRefusesAConfirmedDestination(): void
+    {
+        $store = $this->destinationStore(PublishDestination::platformGenerated());
+
+        $result = $this->service(destinationStore: $store)->saveDestination([
+            'source' => 'custom', 'domain' => 'example.com', 'namespace' => 'icann', 'dns_hosting_enabled' => true,
+        ]);
+
+        self::assertFalse($result->saved);
+        self::assertSame(PublishDestinationRefusal::ConfirmedCannotChange, $result->refusal);
+        // The stored choice is untouched.
+        self::assertSame(PublishDestination::platformGenerated()->toArray(), $store->read()?->destination->toArray());
+    }
+
+    public function testSaveDestinationRefusesACreatedOrAttachedDestination(): void
+    {
+        $confirmed = PublishDestination::platformGenerated();
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $store->saveDraft($confirmed);
+        $store->confirm($confirmed);
+        $store->markCreatedOrAttached();
+
+        $result = $this->service(destinationStore: $store)->saveDestination([
+            'source' => 'platform', 'label' => 'other-site',
+        ]);
+
+        self::assertFalse($result->saved);
+        self::assertSame(PublishDestinationRefusal::CreatedOrAttachedCannotChange, $result->refusal);
+        self::assertSame(PublishDestination::platformGenerated()->toArray(), $store->read()?->destination->toArray());
+    }
+
+    public function testConfirmDestinationFreezesTheDraftChoice(): void
+    {
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $input = ['source' => 'custom', 'domain' => 'example.com', 'namespace' => 'icann', 'dns_hosting_enabled' => false];
+        $this->service(destinationStore: $store)->saveDestination($input);
+
+        $result = $this->service(destinationStore: $store)->confirmDestination($input);
+
+        self::assertTrue($result->confirmed);
+        self::assertNull($result->refusal);
+        self::assertSame('confirmed', $result->lifecycle);
+        $view = $this->service(destinationStore: $store)->readDestination();
+        self::assertSame('confirmed', $view->lifecycle);
+        self::assertSame([
+            'source' => 'custom', 'domain' => 'example.com', 'namespace' => 'icann',
+            'dns_hosting_enabled' => false, 'platform_domain' => null, 'platform_namespace' => null,
+            'generate' => false, 'label' => null, 'website_id' => null,
+        ], $view->destination);
+    }
+
+    public function testConfirmDestinationIsIdempotentForAnUnchangedConfirmedChoice(): void
+    {
+        // A page refresh re-confirming the same uncreated choice must succeed,
+        // never discard it.
+        $input = ['source' => 'platform', 'label' => 'my-site'];
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $store->saveDraft(PublishDestination::platformLabelled('my-site'));
+        $store->confirm(PublishDestination::platformLabelled('my-site'));
+
+        $result = $this->service(destinationStore: $store)->confirmDestination($input);
+
+        self::assertTrue($result->confirmed);
+        self::assertSame('confirmed', $result->lifecycle);
+        self::assertSame('confirmed', $store->read()?->lifecycle->value);
+    }
+
+    public function testConfirmDestinationRefusesAChangedConfirmedChoice(): void
+    {
+        $store = $this->destinationStore(PublishDestination::platformLabelled('my-site'));
+
+        $result = $this->service(destinationStore: $store)->confirmDestination([
+            'source' => 'platform', 'label' => 'other-site',
+        ]);
+
+        self::assertFalse($result->confirmed);
+        self::assertSame(PublishDestinationRefusal::ConfirmedCannotChange, $result->refusal);
+        self::assertSame('my-site', $store->read()?->destination->label);
+    }
+
+    public function testConfirmDestinationRefusesInvalidInputSideEffectFree(): void
+    {
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+
+        $result = $this->service(destinationStore: $store)->confirmDestination(['source' => 'carrier-pigeon']);
+
+        self::assertFalse($result->confirmed);
+        self::assertSame(PublishDestinationRefusal::InvalidInput, $result->refusal);
+        self::assertNull($store->read());
+    }
+
+    public function testReadDestinationReportsNoSetupWithoutAStore(): void
+    {
+        $view = $this->service()->readDestination();
+
+        self::assertNull($view->lifecycle);
+        self::assertNull($view->destination);
+    }
+
+    public function testStatusReportsThePersistedDestination(): void
+    {
+        // A hard refresh restores the confirmed (not-yet-created) choice from
+        // the status report instead of discarding it.
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $destination = PublishDestination::custom('example.com', 'icann', false);
+        $store->saveDraft($destination);
+        $store->confirm($destination);
+
+        $payload = $this->service(destinationStore: $store)->status()->toArray();
+
+        self::assertSame([
+            'lifecycle' => 'confirmed',
+            'destination' => $destination->toArray(),
+        ], $payload['destination']);
+    }
+
+    public function testConfirmExistingDestinationAttachesThenFreezesAndRecordsIdentity(): void
+    {
+        // An existing-site confirmation attaches the chosen website to the
+        // workspace FIRST and only then freezes the destination
+        // (created/attached) and records the identity — a failed attach can
+        // never leave a confirmed destination behind.
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $store->saveDraft(PublishDestination::existing('42'));
+        $linker = new FakeWorkspaceLinker();
+        $registry = new FakePublishRegistry();
+
+        $result = $this->service(
+            registry: $registry,
+            connection: $this->resolvedConnectionResolver(),
+            workspaces: $linker,
+            destinationStore: $store,
+        )->confirmDestination(['source' => 'existing', 'website_id' => '42']);
+
+        self::assertTrue($result->confirmed);
+        self::assertSame('created_or_attached', $result->lifecycle);
+        self::assertSame('11', $linker->workspaceId);
+        self::assertSame(42, $linker->websiteId);
+        self::assertSame('42', $registry->current()?->websiteId);
+        self::assertSame(PublishDestinationLifecycle::CreatedOrAttached, $store->read()?->lifecycle);
+    }
+
+    public function testConfirmExistingDestinationMapsAttach409ToAlreadyAttachedRefusal(): void
+    {
+        // The attach API answers 409 when the chosen website already belongs
+        // to a workspace: the confirmation is refused with the fixed
+        // already-attached code, nothing is stored, nothing is recorded.
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $store->saveDraft(PublishDestination::existing('42'));
+        $linker = new FakeWorkspaceLinker();
+        $linker->attachException = new UnexpectedStatusCodeException(new HttpResponse(new Response(409, [], 'conflict')));
+        $registry = new FakePublishRegistry();
+
+        $result = $this->service(
+            registry: $registry,
+            connection: $this->resolvedConnectionResolver(),
+            workspaces: $linker,
+            destinationStore: $store,
+        )->confirmDestination(['source' => 'existing', 'website_id' => '42']);
+
+        self::assertFalse($result->confirmed);
+        self::assertSame(PublishDestinationRefusal::WebsiteAlreadyAttached, $result->refusal);
+        // The editable draft survives for the retry; nothing moved past it.
+        self::assertSame(PublishDestinationLifecycle::Draft, $store->read()?->lifecycle);
+        self::assertNull($registry->current()?->websiteId);
+    }
+
+    public function testConfirmExistingDestinationMapsOtherAttachFailuresToAttachFailedRefusal(): void
+    {
+        // A non-conflict attach failure (transport/portal) refuses with the
+        // fixed attach-failed code so the operator can retry — the choice is
+        // not confirmed over a website that was never attached.
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $store->saveDraft(PublishDestination::existing('42'));
+        $linker = new FakeWorkspaceLinker();
+        $linker->attachException = new UnexpectedStatusCodeException(new HttpResponse(new Response(500, [], 'boom')));
+
+        $result = $this->service(
+            registry: new FakePublishRegistry(),
+            connection: $this->resolvedConnectionResolver(),
+            workspaces: $linker,
+            destinationStore: $store,
+        )->confirmDestination(['source' => 'existing', 'website_id' => '42']);
+
+        self::assertFalse($result->confirmed);
+        self::assertSame(PublishDestinationRefusal::AttachFailed, $result->refusal);
+        // The editable draft survives for the retry; nothing moved past it.
+        self::assertSame(PublishDestinationLifecycle::Draft, $store->read()?->lifecycle);
+    }
+
+    public function testConfirmPlatformDestinationDoesNotAttach(): void
+    {
+        // Only an existing site is attached at confirmation: a platform
+        // confirmation freezes the choice and leaves the attach adapter
+        // untouched (the website is created later, at publish time).
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $store->saveDraft(PublishDestination::platformGenerated());
+        $linker = new FakeWorkspaceLinker();
+
+        $result = $this->service(
+            registry: new FakePublishRegistry(),
+            connection: $this->resolvedConnectionResolver(),
+            workspaces: $linker,
+            destinationStore: $store,
+        )->confirmDestination(['source' => 'platform', 'generate' => true]);
+
+        self::assertTrue($result->confirmed);
+        self::assertSame('confirmed', $result->lifecycle);
+        self::assertSame(0, $linker->calls);
+    }
+
     /* ------------------------- first publish start ------------------------- */
+
+    public function testStartFirstPublishRefusesWithoutAConfirmedDestination(): void
+    {
+        // A first publish (no identity yet) must carry an explicit, confirmed
+        // destination — the scheduler snapshots it into the run settings — so
+        // an implicit hostname can never reach the wire again.
+        $result = $this->service()->startFirstPublish();
+
+        self::assertFalse($result->queued);
+        self::assertSame(PublishStartRefusal::DestinationNotConfirmed, $result->refusal);
+        self::assertNull($this->repository->latest());
+        self::assertSame(0, $this->scheduler->count());
+    }
+
+    public function testStartFirstPublishRefusesWithADraftOnlyDestination(): void
+    {
+        // Saving a draft is not enough: the choice must be explicitly
+        // confirmed before the first publish may start.
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $store->saveDraft(PublishDestination::platformGenerated());
+
+        $result = $this->service(destinationStore: $store)->startFirstPublish();
+
+        self::assertFalse($result->queued);
+        self::assertSame(PublishStartRefusal::DestinationNotConfirmed, $result->refusal);
+        self::assertNull($this->repository->latest());
+        self::assertSame(0, $this->scheduler->count());
+    }
 
     public function testStartRefusesWhenEnvIdentityMissing(): void
     {
@@ -866,7 +1220,7 @@ final class PublishSetupServiceTest extends TestCase
         $pending->markDirty(at: 1000);
         $this->repository->save($pending);
 
-        $result = $this->service()->startFirstPublish();
+        $result = $this->service(destinationStore: $this->destinationStore())->startFirstPublish();
 
         self::assertTrue($result->queued);
         self::assertSame('run-pending', $result->runId);
@@ -888,7 +1242,7 @@ final class PublishSetupServiceTest extends TestCase
         $run->fail('The upload timed out', at: 1000);
         $this->repository->save($run);
 
-        $result = $this->service()->startFirstPublish();
+        $result = $this->service(destinationStore: $this->destinationStore())->startFirstPublish();
 
         self::assertTrue($result->queued);
         self::assertNull($result->refusal);
@@ -915,7 +1269,7 @@ final class PublishSetupServiceTest extends TestCase
         $run->cancel(at: 1000);
         $this->repository->save($run);
 
-        $result = $this->service()->startFirstPublish();
+        $result = $this->service(destinationStore: $this->destinationStore())->startFirstPublish();
 
         self::assertTrue($result->queued);
         self::assertNull($result->refusal);
@@ -943,7 +1297,12 @@ final class PublishSetupServiceTest extends TestCase
 
     public function testStartSnapshotsSettingsCreatesRunAndSchedulesOneTick(): void
     {
-        $result = $this->service()->startFirstPublish();
+        // The confirmed destination is snapshotted into the fresh run's
+        // settings through the scheduler's run construction path.
+        $destination = PublishDestination::custom('example.com', 'icann', true);
+        $store = $this->destinationStore($destination);
+
+        $result = $this->service(destinationStore: $store)->startFirstPublish();
 
         self::assertTrue($result->queued);
         self::assertNotNull($result->runId);
@@ -955,8 +1314,9 @@ final class PublishSetupServiceTest extends TestCase
         self::assertSame(RunStatus::NotStarted, $run->status);
         self::assertTrue($run->dirty);
         // The settings snapshot is immutable; a fresh run defaults to the
-        // ipns mode.
+        // ipns mode and carries the confirmed destination.
         self::assertSame('ipns', $run->settingsSnapshot()['target_type']);
+        self::assertSame($destination->toArray(), $run->settings->destination?->toArray());
 
         self::assertSame(1, $this->scheduler->count());
         self::assertTrue($this->scheduler->isScheduled(ContentPublishScheduler::AUTO_HOOK));
@@ -965,7 +1325,7 @@ final class PublishSetupServiceTest extends TestCase
 
     public function testStartReturnsQueuedDto(): void
     {
-        $payload = $this->service()->startFirstPublish()->toArray();
+        $payload = $this->service(destinationStore: $this->destinationStore())->startFirstPublish()->toArray();
 
         self::assertTrue($payload['queued']);
         self::assertSame('queued', $payload['status']);
@@ -976,7 +1336,7 @@ final class PublishSetupServiceTest extends TestCase
     public function testStartNeverCreatesAWebsiteOrMutatesIdentity(): void
     {
         $before = $this->identity->current();
-        $result = $this->service()->startFirstPublish();
+        $result = $this->service(destinationStore: $this->destinationStore())->startFirstPublish();
 
         self::assertTrue($result->queued);
         // Only a fresh run + one tick: no website/identity write anywhere.
@@ -1525,6 +1885,150 @@ final class PublishSetupServiceTest extends TestCase
         self::assertStringNotContainsString('operator', $json);
     }
 
+    /* -------------------- awaiting-DNS pause + resume -------------------- */
+
+    /**
+     * A custom-domain first publish parked at the explicit awaiting-DNS
+     * boundary: intact pack, website created and recorded, CID/IPNS
+     * preserved, run paused — the exact state the custom-domain pause lands
+     * in while the operator connects the domain's DNS.
+     */
+    private function parkedAwaitingDnsRun(?RunSettings $settings = null): ExportRun
+    {
+        $settings ??= new RunSettings(
+            destination: PublishDestination::custom('shop.example.com', 'icann', false),
+        );
+        $destination = $settings->destination ?? PublishDestination::custom('shop.example.com', 'icann', false);
+        $run = ExportRun::create('run-dns', $settings, at: 1000);
+        $run->start(at: 1000);
+        $run->recordPack(new PackResult(
+            PackStatus::Completed,
+            42,
+            0,
+            12345,
+            '/tmp/exports/run-dns.zip',
+            '/tmp/exports/manifest.json',
+        ), at: 1001);
+        $run->recordPublishBoundary(PublishBoundaryResult::awaitingDns(
+            'bafy-parked-cid',
+            'web-42',
+            'k1-shop.example.com',
+            'Waiting for the domain DNS',
+        ), at: 1002);
+        $run->pause(at: 1002);
+        $this->repository->save($run);
+
+        return $run;
+    }
+
+    public function testStatusReportsAwaitingDnsForAParkedCustomDomainRun(): void
+    {
+        // The website identity IS recorded (the create struck before the
+        // pause), so the awaiting-WEBSITE signal must stay off — this is a
+        // domain-DNS wait, reported on its own explicit fields.
+        $this->identity->setCurrentIdentity(new PublishIdentity('web-42', 'shop.example.com', 'k-ipns-7', 'cast-live', true));
+        $this->parkedAwaitingDnsRun();
+
+        $status = $this->service()->status();
+
+        self::assertTrue($status->awaitingDns);
+        self::assertSame('shop.example.com', $status->awaitingDomain, 'the SELECTED domain is surfaced, never an implicit list pick');
+        self::assertFalse($status->awaitingWebsite);
+        self::assertTrue($status->toArray()['awaiting_dns']);
+        self::assertSame('shop.example.com', $status->toArray()['awaiting_domain']);
+    }
+
+    public function testStatusIsNotAwaitingDnsForAPlainResumableRun(): void
+    {
+        // The generic resumable park (no website yet) is NOT the custom-domain
+        // DNS wait — the two states are deliberately distinct.
+        $this->parkedResumableRun();
+
+        $status = $this->service()->status();
+
+        self::assertFalse($status->awaitingDns);
+        self::assertNull($status->awaitingDomain);
+        self::assertTrue($status->awaitingWebsite, 'the plain park keeps its own signal');
+    }
+
+    public function testPublishExistingRefusesAnAwaitingDnsRunUntilTheDnsIsVerified(): void
+    {
+        // Incomplete DNS: the bound domain list has no row for the run's
+        // selected domain, so the resume is refused (side-effect free) and
+        // the run stays parked — never seeded, never re-uploaded.
+        $this->identity->setCurrentIdentity($this->readyIdentity());
+        $this->parkedAwaitingDnsRun();
+        $domains = new FakeDomainClient();
+        $domains->domains = [new Domain('9', 'other.example.com', 'icann', false, 'waiting_delegation', 'gw.example.com')];
+
+        $result = $this->service(domains: $domains)->publishExisting();
+
+        self::assertFalse($result->queued);
+        self::assertSame(PublishExistingRefusal::DomainDnsNotVerified, $result->refusal);
+        // Side-effect free: the parked slot stands, nothing is scheduled.
+        self::assertSame('run-dns', $this->repository->latest()?->runId);
+        self::assertSame(0, $this->scheduler->count());
+    }
+
+    public function testPublishExistingResumesAnAwaitingDnsRunOnceTheDnsIsVerified(): void
+    {
+        // Verified DNS: the bound domain matching the run's selected domain
+        // verifies active, so the intact artifact resumes through the normal
+        // publish-only replay — no re-export, no re-upload.
+        $this->identity->setCurrentIdentity($this->readyIdentity());
+        $this->parkedAwaitingDnsRun();
+        $domains = new FakeDomainClient();
+        $domains->domains = [new Domain('9', 'shop.example.com', 'icann', false, 'waiting_delegation', 'gw.example.com')];
+
+        $result = $this->service(domains: $domains)->publishExisting();
+
+        self::assertTrue($result->queued);
+        self::assertNull($result->refusal);
+        self::assertNotNull($result->runId);
+        // The existing verify adapter was exercised for the selected domain.
+        self::assertContains(['verify', ['web-42', '9']], $domains->calls);
+
+        $fresh = $this->repository->find($result->runId);
+        self::assertNotNull($fresh);
+        self::assertSame('publish|', $fresh->resumeCursor);
+        self::assertSame('/tmp/exports/run-dns.zip', $fresh->pack?->zipPath, 'the intact artifact is reused');
+        self::assertSame(1, $this->scheduler->count());
+    }
+
+    public function testPublishExistingStaysAwaitingWhenTheDnsCheckCannotRun(): void
+    {
+        // The portal is unreachable during the DNS check: an unverifiable DNS
+        // is an incomplete DNS — the resume is refused and the run stays
+        // parked (idempotent: the operator can retry the check any time).
+        $this->identity->setCurrentIdentity($this->readyIdentity());
+        $this->parkedAwaitingDnsRun();
+        $domains = new FakeDomainClient();
+        $domains->domains = [new Domain('9', 'shop.example.com', 'icann', false, 'waiting_delegation', 'gw.example.com')];
+        $domains->throw = new DomainClientException('gateway timeout');
+
+        $result = $this->service(domains: $domains)->publishExisting();
+
+        self::assertFalse($result->queued);
+        self::assertSame(PublishExistingRefusal::DomainDnsNotVerified, $result->refusal);
+        self::assertSame('run-dns', $this->repository->latest()?->runId);
+        self::assertSame(0, $this->scheduler->count());
+    }
+
+    public function testPublishExistingRefusesAnAwaitingDnsRunWithoutADomainClient(): void
+    {
+        // No domain adapter wired (incomplete portal composition): the DNS
+        // cannot be proven verified, so the resume is refused — the run stays
+        // parked rather than resuming blind.
+        $this->identity->setCurrentIdentity($this->readyIdentity());
+        $this->parkedAwaitingDnsRun();
+
+        $result = $this->service()->publishExisting();
+
+        self::assertFalse($result->queued);
+        self::assertSame(PublishExistingRefusal::DomainDnsNotVerified, $result->refusal);
+        self::assertSame('run-dns', $this->repository->latest()?->runId);
+    }
+
     /* -------------------- awaitingWebsite derivation -------------------- */
 
     /**
@@ -1827,6 +2331,33 @@ final class PublishSetupServiceTest extends TestCase
         self::assertSame('ipfs', $request->targetType);
         self::assertTrue($request->generate);
         self::assertNull($request->domain);
+    }
+
+    public function testCreateWebsiteUsesTheRunDestinationWhenPresent(): void
+    {
+        // A parked run that carries a confirmed destination provisions from
+        // IT — the pinner CLI's custom-domain contract (domain + namespace +
+        // explicit dns-hosting choice, no label/generate/platform fields) —
+        // and a client-supplied hostname can never override the choice.
+        $settings = new RunSettings(destination: PublishDestination::custom('shop.example.com', 'icann', false));
+        $this->parkedResumableRun('bafy-parked-cid', 'k51-ipns-parked', $settings);
+        $websites = new FakeWebsiteList();
+
+        $result = $this->service(websites: $websites, registry: new FakePublishRegistry())
+            ->createWebsite('ignored.example.com');
+
+        self::assertTrue($result->created);
+        $request = $websites->lastCreate;
+        self::assertNotNull($request);
+        self::assertSame('k51-ipns-parked', $request->targetHash);
+        self::assertSame('ipns', $request->targetType);
+        self::assertSame('shop.example.com', $request->domain);
+        self::assertSame('icann', $request->namespace);
+        self::assertFalse($request->dnsHostingEnabled, 'the run destination states self-managed dns');
+        self::assertNull($request->label);
+        self::assertFalse($request->generate);
+        self::assertNull($request->platformDomain);
+        self::assertNull($request->platformNamespace);
     }
 
     public function testCreateWebsiteNamedHostnameSendsCustomDomainIcannManagedNotGenerate(): void

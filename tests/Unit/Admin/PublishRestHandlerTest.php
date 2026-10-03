@@ -24,7 +24,9 @@ use LumeWeb\Cast\Jobs\InMemoryScheduler;
 use LumeWeb\Cast\Jobs\PublishModeStore;
 use LumeWeb\Cast\Onboarding\Wizard;
 use LumeWeb\Cast\Onboarding\WizardState;
+use LumeWeb\Cast\Publish\WordPressPublishDestinationStore;
 use LumeWeb\Cast\Tests\Unit\Onboarding\FakeWizardStore;
+use LumeWeb\Cast\Tests\Unit\Persistence\FakeOptionGateway;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -107,9 +109,139 @@ final class PublishRestHandlerTest extends TestCase
                 identity: $this->identity,
                 modeStore: $modeStore,
                 workItems: new InMemoryWorkItemRepository(),
+                destinationStore: self::confirmedDestinationStore(),
             ),
             modeStore: $modeStore,
             clock: $this->clock,
+            // A confirmed destination so the first-publish route stays a
+            // first-publish (the gate requires a confirmed choice).
+            destinationStore: self::confirmedDestinationStore(),
+        );
+    }
+
+    /**
+     * @return WordPressPublishDestinationStore
+     */
+    private static function confirmedDestinationStore(): WordPressPublishDestinationStore
+    {
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $store->saveDraft(\LumeWeb\Cast\Publish\PublishDestination::platformGenerated());
+        $store->confirm(\LumeWeb\Cast\Publish\PublishDestination::platformGenerated());
+
+        return $store;
+    }
+
+    public function testDestinationReturnsTypedView(): void
+    {
+        // No setup yet: the empty view (the wizard's "choose an address").
+        $fresh = new PublishRestHandler($this->serviceWithoutDestination());
+        self::assertSame(['lifecycle' => null, 'destination' => null], $fresh->destination());
+
+        // After a save: the draft is visible on a later read (refresh does
+        // not discard an unconfirmed choice).
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $handler = new PublishRestHandler($this->serviceWithDestinationStore($store));
+        self::assertTrue($handler->saveDestination(['source' => 'platform', 'generate' => true])['saved']);
+        self::assertSame('draft', $handler->destination()['lifecycle']);
+    }
+
+    public function testSaveDestinationDelegatesAllowlistedFieldsAndReturnsTypedPayload(): void
+    {
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $handler = new PublishRestHandler($this->serviceWithDestinationStore($store));
+
+        // A non-allowlisted field is ignored by the service parser.
+        $payload = $handler->saveDestination([
+            'source' => 'custom', 'domain' => 'example.com', 'namespace' => 'icann',
+            'dns_hosting_enabled' => true, 'evil' => 'injected',
+        ]);
+
+        self::assertTrue($payload['saved']);
+        self::assertSame('saved', $payload['status']);
+        self::assertNull($payload['refusal']);
+        self::assertSame('draft', $payload['lifecycle']);
+    }
+
+    public function testSaveDestinationReturnsTypedRefusalPayloadForInvalidInput(): void
+    {
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $handler = new PublishRestHandler($this->serviceWithDestinationStore($store));
+
+        $payload = $handler->saveDestination(['source' => 'carrier-pigeon']);
+
+        self::assertFalse($payload['saved']);
+        self::assertSame('refused', $payload['status']);
+        self::assertSame('invalid_input', $payload['refusal']);
+    }
+
+    public function testConfirmDestinationDelegatesAndReturnsTypedPayload(): void
+    {
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $store->saveDraft(\LumeWeb\Cast\Publish\PublishDestination::platformGenerated());
+        $handler = new PublishRestHandler($this->serviceWithDestinationStore($store));
+
+        $payload = $handler->confirmDestination(['source' => 'platform', 'generate' => true]);
+
+        self::assertTrue($payload['confirmed']);
+        self::assertSame('confirmed', $payload['status']);
+        self::assertSame('confirmed', $payload['lifecycle']);
+    }
+
+    /**
+     * @return PublishSetupService
+     */
+    private function serviceWithoutDestination(): PublishSetupService
+    {
+        $modeStore = new InMemoryPublishModeStore();
+
+        return new PublishSetupService(
+            env: $this->env([
+                EnvIdentity::PORTAL_API_URL => 'https://account.example.test',
+                EnvIdentity::PORTAL_API_KEY => 'api-key',
+            ]),
+            wizardStore: $this->wizardStore,
+            content: $this->content,
+            repository: $this->repository,
+            identity: $this->identity,
+            contentScheduler: new ContentPublishScheduler(
+                clock: $this->clock,
+                repository: $this->repository,
+                scheduler: $this->scheduler,
+                identity: $this->identity,
+                modeStore: $modeStore,
+                workItems: new InMemoryWorkItemRepository(),
+            ),
+            modeStore: $modeStore,
+            clock: $this->clock,
+        );
+    }
+
+    /**
+     * @return PublishSetupService
+     */
+    private function serviceWithDestinationStore(WordPressPublishDestinationStore $store): PublishSetupService
+    {
+        return new PublishSetupService(
+            env: $this->env([
+                EnvIdentity::PORTAL_API_URL => 'https://account.example.test',
+                EnvIdentity::PORTAL_API_KEY => 'api-key',
+            ]),
+            wizardStore: $this->wizardStore,
+            content: $this->content,
+            repository: $this->repository,
+            identity: $this->identity,
+            contentScheduler: new ContentPublishScheduler(
+                clock: $this->clock,
+                repository: $this->repository,
+                scheduler: $this->scheduler,
+                identity: $this->identity,
+                modeStore: new InMemoryPublishModeStore(),
+                workItems: new InMemoryWorkItemRepository(),
+                destinationStore: $store,
+            ),
+            modeStore: new InMemoryPublishModeStore(),
+            clock: $this->clock,
+            destinationStore: $store,
         );
     }
 

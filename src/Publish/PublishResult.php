@@ -40,6 +40,24 @@ final class PublishResult
         return new self(PublishOutcome::Completed, $cid, $ipnsKey, $websiteId, null, $route, $artifactName, null, $readiness);
     }
 
+    /**
+     * A custom-domain first publish that created (or attached) its website
+     * and now pauses: the CID, the IPNS key and the website id are all
+     * preserved, and the caller resumes through the DNS-verification path —
+     * never a re-upload. Deliberately its own verdict, not a resumable
+     * failure: a normal DNS wait is a waiting state.
+     */
+    public static function awaitingDns(
+        string $cid,
+        string $websiteId,
+        string $ipnsKey,
+        UploadRoute $route,
+        string $artifactName,
+        string $message,
+    ): self {
+        return new self(PublishOutcome::AwaitingDns, $cid, $ipnsKey, $websiteId, $message, $route, $artifactName);
+    }
+
     public static function failed(string $message, UploadRoute $route, string $artifactName): self
     {
         return new self(PublishOutcome::Failed, null, null, null, $message, $route, $artifactName);

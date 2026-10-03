@@ -6,6 +6,7 @@ namespace LumeWeb\Cast\Tests\Unit\Admin;
 
 use LumeWeb\Cast\Admin\PublishAdminBarView;
 use LumeWeb\Cast\Admin\PublishDashboardView;
+use LumeWeb\Cast\Admin\PublishDestinationView;
 use LumeWeb\Cast\Admin\PublishStatus;
 use LumeWeb\Cast\Environment\EnvProblem;
 use LumeWeb\Cast\Environment\EnvProblemKind;
@@ -34,6 +35,7 @@ final class PublishDashboardViewTest extends TestCase
             'bootstrapIdentityComplete' => true,
             'envProblems' => [],
             'onboardingComplete' => true,
+            'onboardingSkipped' => false,
             'hasEligibleContent' => true,
             'mode' => PublishMode::Manual,
             'autoActive' => false,
@@ -53,6 +55,17 @@ final class PublishDashboardViewTest extends TestCase
             'identity' => null,
             'awaitingWebsite' => false,
             'awaitingCid' => null,
+            'awaitingDns' => false,
+            'awaitingDomain' => null,
+            // The first-publish surface of these fixtures carries a confirmed
+            // destination, so the choose-address gate stays out of the way
+            // and the legacy readiness expectations keep their meaning.
+            'destination' => new PublishDestinationView('confirmed', [
+                'source' => 'platform', 'domain' => null, 'namespace' => null,
+                'dns_hosting_enabled' => true, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => true, 'label' => null,
+                'website_id' => null,
+            ]),
         ];
         $merged = array_replace($defaults, $overrides);
 
@@ -60,6 +73,7 @@ final class PublishDashboardViewTest extends TestCase
             bootstrapIdentityComplete: (bool) $merged['bootstrapIdentityComplete'],
             envProblems: $merged['envProblems'],
             onboardingComplete: (bool) $merged['onboardingComplete'],
+            onboardingSkipped: (bool) $merged['onboardingSkipped'],
             hasEligibleContent: (bool) $merged['hasEligibleContent'],
             mode: $merged['mode'],
             autoActive: (bool) $merged['autoActive'],
@@ -79,6 +93,9 @@ final class PublishDashboardViewTest extends TestCase
             identity: $merged['identity'],
             awaitingWebsite: (bool) $merged['awaitingWebsite'],
             awaitingCid: $merged['awaitingCid'] === null ? null : (string) $merged['awaitingCid'],
+            awaitingDns: (bool) $merged['awaitingDns'],
+            awaitingDomain: $merged['awaitingDomain'] === null ? null : (string) $merged['awaitingDomain'],
+            destination: $merged['destination'],
         );
     }
 
@@ -105,6 +122,57 @@ final class PublishDashboardViewTest extends TestCase
         self::assertNull($view->stageLabel);
         self::assertSame(0, $view->progressPercent);
         self::assertSame(0, $view->progressCount);
+    }
+
+    public function testUnconfiguredSiteMapsToChooseAddressReadinessNotReady(): void
+    {
+        // A first-time site with no persisted destination must surface the
+        // explicit "choose an address" state — never the generic ready state
+        // that used to let the scheduler mint an implicit hostname.
+        $view = PublishDashboardView::fromStatus($this->makeStatus(['destination' => null]));
+
+        self::assertSame(PublishDashboardView::READINESS_CHOOSE_ADDRESS, $view->readiness);
+        self::assertFalse($view->canStart);
+        self::assertNull($view->primaryAction);
+        self::assertSame('Choose an address for your site — pick a Pinner address, your own domain, or a Pinner site you already have.', $view->contextMessage);
+    }
+
+    public function testDraftDestinationStillMapsToChooseAddressReadiness(): void
+    {
+        // A saved-but-unconfirmed draft is not a confirmed choice: the first
+        // publish stays gated until the operator confirms.
+        $view = PublishDashboardView::fromStatus($this->makeStatus([
+            'destination' => new PublishDestinationView('draft', ['source' => 'platform', 'generate' => true]),
+        ]));
+
+        self::assertSame(PublishDashboardView::READINESS_CHOOSE_ADDRESS, $view->readiness);
+        self::assertFalse($view->canStart);
+    }
+
+    public function testConfirmedDestinationKeepsReadyReadiness(): void
+    {
+        $view = PublishDashboardView::fromStatus($this->makeStatus());
+
+        self::assertSame(PublishDashboardView::READINESS_READY, $view->readiness);
+        self::assertTrue($view->canStart);
+        // The persisted setup passes through so the template can render the
+        // durable address summary without re-deriving it.
+        self::assertSame('confirmed', $view->destinationLifecycle);
+        self::assertNotNull($view->destination);
+        self::assertSame('platform', $view->destination['source']);
+    }
+
+    public function testIdentityBypassesTheChooseAddressGate(): void
+    {
+        // The gate only applies while no identity exists: a site that already
+        // published once keeps the ready surface for later publishes even
+        // though its destination setup is absent.
+        $view = PublishDashboardView::fromStatus($this->makeStatus([
+            'identity' => $this->identity(),
+            'destination' => null,
+        ]));
+
+        self::assertSame(PublishDashboardView::READINESS_READY, $view->readiness);
     }
 
     public function testIncompleteEnvironmentMapsToConfigurationReadiness(): void
@@ -136,6 +204,31 @@ final class PublishDashboardViewTest extends TestCase
         self::assertSame('warning', $view->readinessLevel);
         self::assertFalse($view->canStart);
         self::assertFalse($view->canPublishNow);
+    }
+
+    public function testIncompleteOnboardingContextSaysFinishOnboarding(): void
+    {
+        $view = PublishDashboardView::fromStatus($this->makeStatus([
+            'onboardingComplete' => false,
+        ]));
+
+        self::assertSame('Finish onboarding to publish your site.', $view->contextMessage);
+    }
+
+    public function testSkippedOnboardingContextNeverSaysFinishOnboarding(): void
+    {
+        // A user who deliberately SKIPPED onboarding must never be told to
+        // finish it — the truthful next step is publishing.
+        $view = PublishDashboardView::fromStatus($this->makeStatus([
+            'onboardingComplete' => false,
+            'onboardingSkipped' => true,
+        ]));
+
+        self::assertStringNotContainsString('Finish onboarding', $view->contextMessage);
+        self::assertSame(
+            'You skipped onboarding, so there is nothing to finish — publish your site whenever you are ready.',
+            $view->contextMessage,
+        );
     }
 
     public function testNoEligibleContentMapsToNoContentReadiness(): void
@@ -897,6 +990,38 @@ final class PublishDashboardViewTest extends TestCase
             'runStatus' => RunStatus::NotStarted,
             'runActive' => true,
         ]))->canStartNowEscape);
+    }
+
+    public function testAwaitingDnsMapsToDomainWaitCopyWithNoFakeProgress(): void
+    {
+        // A custom-domain first publish parked at the explicit awaiting-DNS
+        // boundary derives its own copy across the view model: the chip
+        // names the DNS wait (never "Paused" and never a failure), the
+        // context quotes the SELECTED domain, and no fabricated
+        // percentage/count is shown.
+        $view = PublishDashboardView::fromStatus($this->makeStatus([
+            'runStatus' => RunStatus::Paused,
+            'runActive' => true,
+            'awaitingDns' => true,
+            'awaitingDomain' => 'shop.example.com',
+            'identity' => $this->identity(),
+        ]));
+
+        self::assertTrue($view->awaitingDns);
+        self::assertSame('shop.example.com', $view->awaitingDomain);
+        self::assertSame('Waiting for your domain DNS', $view->stateLabel);
+        self::assertSame('paused', $view->runState, 'a DNS wait is a pause — never rendered as a failed run');
+        self::assertSame(0, $view->progressPercent, 'a parked run shows no progress percentage');
+        self::assertSame('Waiting for your domain DNS — the run is paused.', $view->progressCountLabel);
+        self::assertSame(
+            'Your site is uploaded and the website for shop.example.com is created. Connect the domain\'s DNS, then resume — the upload will not be repeated.',
+            $view->contextMessage,
+        );
+
+        // No prominent publish action while parked (the operator connects the
+        // DNS first); Cancel stays the live-run escape.
+        self::assertNull($view->primaryAction);
+        self::assertTrue($view->canCancel);
     }
 
     public function testAwaitingWebsiteMapsToParkedS1CopyWithNoFakeProgress(): void

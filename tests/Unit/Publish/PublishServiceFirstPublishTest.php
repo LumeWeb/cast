@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LumeWeb\Cast\Tests\Unit\Publish;
 
 use LumeWeb\Cast\Publish\Artifact;
+use LumeWeb\Cast\Publish\PublishDestination;
 use LumeWeb\Cast\Publish\PublishOutcome;
 use LumeWeb\Cast\Publish\PublishService;
 use LumeWeb\Cast\Publish\PublishStage;
@@ -21,8 +22,8 @@ use PHPUnit\Framework\TestCase;
  * The first-publish orchestration: upload the archive (archive=true + name),
  * wait for and interpret the terminal upload result, then reconcile the IPNS
  * half BEFORE the website (the key is created once and the CID published,
- * because an IPNS-targeted website requires a live publication), then create
- * the website (domain omitted). In ipns mode — Cast's new default — the
+ * because an IPNS-targeted website requires a live publication), then
+ * provision the website from the run's confirmed destination. In ipns mode — Cast's new default — the
  * website is pointed at the mutable IPNS name; a legacy ipfs run stamps the
  * CID. Failure boundaries are covered here; the "never create a second
  * website/key" rules are covered by the subsequent-publish suite.
@@ -50,7 +51,7 @@ final class PublishServiceFirstPublishTest extends TestCase
 
     public function testFirstPublishUploadsWithArchiveAndNameThenCreatesWebsiteFromCidAndPublishesIpns(): void
     {
-        $result = $this->service->publish($this->artifact());
+        $result = $this->service->publish($this->artifact(), $this->destination());
 
         self::assertSame(PublishOutcome::Completed, $result->outcome);
         self::assertSame('QmHash', $result->cid);
@@ -68,7 +69,8 @@ final class PublishServiceFirstPublishTest extends TestCase
         // The website is created only after the CID exists AND the IPNS key is
         // created + the CID published (an IPNS-targeted website needs the
         // publication first). In legacy ipfs mode the target stays the CID;
-        // type comes from the artifact, label = site hostname, and no domain.
+        // the label is the destination's chosen label (the artifact's
+        // build-host label no longer defines the claim), and no domain.
         self::assertCount(1, $this->websites->created);
         $create = $this->websites->created[0];
         self::assertSame('QmHash', $create->targetHash);
@@ -88,7 +90,7 @@ final class PublishServiceFirstPublishTest extends TestCase
 
     public function testProgressEventsEmitTheFullStageSequenceWithoutLeakingCredentials(): void
     {
-        $this->service->publish($this->artifact());
+        $this->service->publish($this->artifact(), $this->destination());
 
         $stages = array_map(static fn ($progress): PublishStage => $progress->stage, $this->listener->progress);
         self::assertSame([
@@ -114,7 +116,7 @@ final class PublishServiceFirstPublishTest extends TestCase
 
     public function testLargeArtifactIsRoutedToTusInTheUploadSpec(): void
     {
-        $this->service->publish($this->artifact(sizeBytes: 200 * 1024 * 1024));
+        $this->service->publish($this->artifact(sizeBytes: 200 * 1024 * 1024), $this->destination());
 
         self::assertSame(\LumeWeb\Cast\Publish\UploadRoute::Tus, $this->uploads->specs[0]->route);
     }
@@ -179,7 +181,7 @@ final class PublishServiceFirstPublishTest extends TestCase
     {
         $this->websites->createError = 'website service down';
 
-        $result = $this->service->publish($this->artifact());
+        $result = $this->service->publish($this->artifact(), $this->destination());
 
         self::assertSame(PublishOutcome::Resumable, $result->outcome);
         self::assertSame('QmHash', $result->cid);
@@ -254,7 +256,7 @@ final class PublishServiceFirstPublishTest extends TestCase
 
     public function testCompletedPublishConfirmsReadinessAndCarriesTheVerdict(): void
     {
-        $result = $this->service->publish($this->artifact());
+        $result = $this->service->publish($this->artifact(), $this->destination());
 
         self::assertSame(PublishOutcome::Completed, $result->outcome);
         self::assertNotNull($result->readiness);
@@ -274,7 +276,7 @@ final class PublishServiceFirstPublishTest extends TestCase
         // live), not the raw CID. The site serves the CID the name resolves to.
         $this->liveAt('website-1', 'QmHash');
 
-        $result = $this->service->publish($this->artifact(targetType: 'ipns'));
+        $result = $this->service->publish($this->artifact(targetType: 'ipns'), $this->destination());
 
         self::assertSame(PublishOutcome::Completed, $result->outcome);
         self::assertSame('QmHash', $result->cid);
@@ -306,7 +308,7 @@ final class PublishServiceFirstPublishTest extends TestCase
         // whose name has no publication (IPNS_KEY_NOT_FOUND).
         $this->liveAt('website-1', 'QmHash');
 
-        $result = $this->service->publish($this->artifact(targetType: 'ipns'));
+        $result = $this->service->publish($this->artifact(targetType: 'ipns'), $this->destination());
 
         self::assertSame(PublishOutcome::Completed, $result->outcome);
 
@@ -327,7 +329,7 @@ final class PublishServiceFirstPublishTest extends TestCase
         $this->websites->loopResponse = $pending;
         $this->service = $this->makeService(new PollPolicy(maxPolls: 2));
 
-        $result = $this->service->publish($this->artifact());
+        $result = $this->service->publish($this->artifact(), $this->destination());
 
         self::assertSame(PublishOutcome::Resumable, $result->outcome);
         self::assertSame('QmHash', $result->cid);
@@ -360,7 +362,7 @@ final class PublishServiceFirstPublishTest extends TestCase
     {
         $this->websites->getError = 'website status read failed mid-wait';
 
-        $result = $this->service->publish($this->artifact());
+        $result = $this->service->publish($this->artifact(), $this->destination());
 
         self::assertSame(PublishOutcome::Resumable, $result->outcome);
         self::assertSame('QmHash', $result->cid);
@@ -383,6 +385,17 @@ final class PublishServiceFirstPublishTest extends TestCase
             readiness: new WebsiteReadinessWaiter($this->websites, $this->clock, $policy),
             listener: $this->listener,
         );
+    }
+
+    /**
+     * The confirmed platform destination these first-publish runs carry: a
+     * chosen platform label that matches the artifact's former label, so the
+     * suite keeps proving the IPNS/create ordering while the claim comes from
+     * the destination — never the artifact's build-host label.
+     */
+    private function destination(): PublishDestination
+    {
+        return PublishDestination::platformLabelled('example.com');
     }
 
     private function artifact(int $sizeBytes = 2048, string $name = 'run-abc-123.zip', string $label = 'example.com', string $targetType = 'ipfs-dir'): Artifact

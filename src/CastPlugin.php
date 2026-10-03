@@ -77,6 +77,7 @@ use LumeWeb\Cast\Persistence\WordPressRunRepository;
 use LumeWeb\Cast\Persistence\WordPressTransientGateway;
 use LumeWeb\Cast\Persistence\WordPressWizardStore;
 use LumeWeb\Cast\Persistence\WordPressWpDbGateway;
+use LumeWeb\Cast\Portal\SelfIdentification;
 use LumeWeb\Cast\Publish\IpfsDomainClient;
 use LumeWeb\Cast\Publish\IpfsIpnsClient;
 use LumeWeb\Cast\Publish\IpfsUploadClient;
@@ -86,6 +87,7 @@ use LumeWeb\Cast\Publish\SystemPublishClock;
 use LumeWeb\Cast\Publish\UploadRouter;
 use LumeWeb\Cast\Publish\UploadWaiter;
 use LumeWeb\Cast\Publish\WebsiteReadinessWaiter;
+use LumeWeb\Cast\Publish\WordPressPublishDestinationStore;
 use LumeWeb\Cast\Publish\WordPressPublishRegistry;
 use LumeWeb\Cast\Upload\PostUploader;
 use LumeWeb\Cast\Upload\TusUploader;
@@ -208,6 +210,14 @@ final class CastPlugin
         // message instead of parking an UnwiredStage. Only after this final
         // boundary does the orchestrator move the run to a terminal status.
         $options = new WordPressOptionGateway();
+        // The first-publish destination setup is persisted as a single
+        // non-autoloaded option through the shared option gateway. The SAME
+        // store instance is handed to the setup service (read/save/confirm
+        // surface + first-publish gate) and the content scheduler (the
+        // confirmed-destination snapshot into fresh run settings), so the
+        // admin surface and the run construction path always agree on one
+        // persisted choice.
+        $destinationStore = new WordPressPublishDestinationStore($options);
         $clock = new SystemClock();
         $repository = new WordPressRunRepository($options);
         $lock = new WordPressLock($options, $clock);
@@ -290,6 +300,7 @@ final class CastPlugin
         // WorkspaceLinker adapter); both default null and are only populated
         // inside the portal-identity guard below.
         $rawWebsites = null;
+        $domainClient = null;
         $websiteRegistry = null;
         $workspaceLinker = null;
         $rawIpns = null;
@@ -345,17 +356,26 @@ final class CastPlugin
                 ipns: new IpfsIpnsClient($rawIpns, $registry),
                 registry: $registry,
                 readiness: new WebsiteReadinessWaiter($websites, new SystemPublishClock()),
+                // The existing-destination attach half: the same workspace
+                // linker the guided setup actions use, with the workspace id
+                // resolved LAZILY from the portal connection (never from
+                // client input) when a first publish must attach.
+                workspaces: $workspaceLinker,
+                workspaceIdProvider: static fn (): ?string => self::workspaceIdFor($connectionResolver->current()),
             );
             // The real publish boundary is a per-run factory like Setup/Rewrite/
             // Pack: it derives the artifact's target type from the run's
-            // persisted settings snapshot and the publish label from the probed
+            // persisted settings snapshot, the publish label from the probed
             // origin the orchestrator re-hydrated into the shared state just
-            // before the factory runs.
+            // before the factory runs (IPNS key naming only), and the
+            // confirmed destination the first publish provisions the website
+            // from — never from the probed origin host.
             $publishFactory = static fn (string $runId, ?RunSettings $settings): PublishStage => new PublishStage(
                 publish: $publishService,
                 state: $state,
                 targetType: $settings->targetType ?? 'ipns',
                 label: $state->probe?->origin?->host() ?? 'site',
+                destination: $settings?->destination,
             );
             // Admin domain-setup surface: the same transport/baseUrl/bearer
             // the publish stack uses drive the ipfs-sdk domains client, and
@@ -363,6 +383,12 @@ final class CastPlugin
             // binding always targets the registered website id. The registrar
             // only registers rest_api_init — no front-end hooks; the same
             // service backs the publish dashboard panel via the subscriber.
+            // The adapter is shared with the publish setup service, whose
+            // awaiting-DNS resume gate reuses the same list/verify calls.
+            $domainClient = new IpfsDomainClient(
+                new \LumeWeb\Cast\Ipfs\IpfsDomainsClient($transport, $baseUrl, $bearer),
+                $rawWebsites,
+            );
             $domainSetup = new DomainSetupService(
                 env: EnvIdentity::fromEnvironment(),
                 identity: $identity,
@@ -371,10 +397,7 @@ final class CastPlugin
                 // validation (POST /api/websites/{id}/validate) that the panel's
                 // Validate action issues — the adapter stays the only interface the
                 // admin layer talks to for domain work.
-                domains: new IpfsDomainClient(
-                    new \LumeWeb\Cast\Ipfs\IpfsDomainsClient($transport, $baseUrl, $bearer),
-                    $rawWebsites,
-                ),
+                domains: $domainClient,
             );
             $domainRestRegistrar = new DomainRestRouteRegistrar(
                 new DomainRestHandler($domainSetup),
@@ -484,7 +507,7 @@ final class CastPlugin
         // run id is persisted (ensurePendingRun), so the fresh per-run work
         // directory never inherits the prior run's done/rewritten rows — the
         // same SqlWorkItemRepository the discover/capture/rewrite stages drive.
-        $contentScheduler = new ContentPublishScheduler($clock, $repository, $scheduler, $identity, $publishMode, $items);
+        $contentScheduler = new ContentPublishScheduler($clock, $repository, $scheduler, $identity, $publishMode, $items, destinationStore: $destinationStore);
 
         // Artifact retention GC: one shared WordPressArtifactStore over the
         // uploads-root `cast-exports` jail (the same directory Pack writes the
@@ -513,10 +536,14 @@ final class CastPlugin
         // run repository, wizard store, scheduler and identity gateway the
         // background jobs use, so everything agrees on a single run slot. The
         // registrar only registers rest_api_init — no front-end hooks.
+        // Shared by the publish admin surface (first-publish readiness) and the
+        // job hooks (ignoring factory-default-only publish transitions), so
+        // both agree on "is there publishable public content yet?".
+        $contentProbe = new WordPressPublishedContentProbe();
         $publishSetup = new PublishSetupService(
             env: $deploymentEnv,
             wizardStore: $store,
-            content: new WordPressPublishedContentProbe(),
+            content: $contentProbe,
             repository: $repository,
             identity: $identity,
             contentScheduler: $contentScheduler,
@@ -549,6 +576,14 @@ final class CastPlugin
             // targeted websites (default Cast mode); null without a complete
             // portal identity, exactly like the other optional adapters.
             ipns: $rawIpns,
+            // The destination setup store (shared with the scheduler above):
+            // backs the read/save/confirm REST surface and gates the first
+            // publish on a confirmed destination.
+            destinationStore: $destinationStore,
+            // The shared domain adapters: the awaiting-DNS resume gate proves
+            // the selected domain's DNS is verified before a parked
+            // custom-domain run may replay its artifact.
+            domains: $domainClient,
         );
         $restRegistrar = new PublishRestRouteRegistrar(
             new PublishRestHandler($publishSetup),
@@ -641,5 +676,23 @@ final class CastPlugin
 
         /** @var \wpdb $wpdb */
         return $wpdb->prefix;
+    }
+
+    /**
+     * The workspace id a first-publish attach targets, resolved from the
+     * portal self-identification — the same rule the admin setup service
+     * applies: a resolved connection with a positive workspace id, else null
+     * (the publish then refuses with a fixed friendly message instead of
+     * attaching to a guessed workspace).
+     */
+    private static function workspaceIdFor(?SelfIdentification $self): ?string
+    {
+        if ($self === null || !$self->isResolved() || $self->workspace() === null) {
+            return null;
+        }
+
+        $id = $self->workspace()->id();
+
+        return $id > 0 ? (string) $id : null;
     }
 }

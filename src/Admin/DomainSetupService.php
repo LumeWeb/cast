@@ -6,6 +6,7 @@ namespace LumeWeb\Cast\Admin;
 
 use LumeWeb\Cast\Environment\EnvIdentity;
 use LumeWeb\Cast\Jobs\IdentityGateway;
+use LumeWeb\Cast\Publish\Domain;
 use LumeWeb\Cast\Publish\DomainClient;
 use LumeWeb\Cast\Publish\DomainClientException;
 
@@ -207,20 +208,22 @@ final class DomainSetupService
      * publish dashboard render.
      *
      * Lists the website's domains (refusing side-effect-free when the env or
-     * website identity is missing), then — only when a bound domain exists —
-     * reads the SSL status and the DNS delegation requirements scoped to the
-     * first (selected) bound domain so the panel can show the delegation and
-     * certificate copy without a second round trip. The preconditions mirror
-     * {@see DomainDashboardView::fromState()}: the same env/website checks this
-     * service refuses on, so the view and the service can never disagree about
-     * which actions exist.
+     * website identity is missing), then — only when the explicitly selected
+     * destination domain is among the bound domains — reads the SSL status and
+     * the DNS delegation requirements scoped to THAT domain so the panel can
+     * show the delegation and certificate copy without a second round trip.
+     * The first listed domain is never adopted implicitly: without a
+     * destination domain (or when none of the bound domains matches it) the
+     * panel carries no selected domain, no SSL/DNS read and no domain-scoped
+     * actions — the destination/created binding, not `domains[0]`, identifies
+     * the domain the workflow manages.
      *
      * The onboarding terminal flag lets the panel tell "finish onboarding"
      * apart from "your site is not published yet" — the two setup states have
      * different next steps, and the service is fed the fact by the caller (the
      * publish subscriber already resolves onboarding from the wizard store).
      */
-    public function dashboard(bool $onboardingComplete = true): DomainDashboardView
+    public function dashboard(bool $onboardingComplete = true, ?string $destinationDomain = null): DomainDashboardView
     {
         $envComplete = $this->env->isComplete();
         $hasWebsite = $this->identity->current() !== null;
@@ -231,10 +234,11 @@ final class DomainSetupService
         $dns = null;
         $selected = false;
 
-        if ($list->listed && $list->domains !== []) {
+        $selectedDomain = $this->selectDestinationDomain($list->domains, $destinationDomain);
+        if ($selectedDomain !== null) {
             $selected = true;
-            $ssl = $this->sslStatus($list->domains[0]->domain);
-            $dns = $this->dnsRequirements($list->domains[0]->id);
+            $ssl = $this->sslStatus($selectedDomain->domain);
+            $dns = $this->dnsRequirements($selectedDomain->id);
         }
 
         return DomainDashboardView::fromState(
@@ -246,6 +250,32 @@ final class DomainSetupService
             ssl: $ssl,
             dns: $dns,
         );
+    }
+
+    /**
+     * The bound domain the panel scopes its SSL/DNS reads to: the one whose
+     * name matches the explicitly selected destination domain (domain names
+     * compare case-insensitively). No destination domain, or no match among
+     * the bound domains, yields null — there is deliberately NO fall-back to
+     * the first listed domain, so an unrelated bound domain can never pose as
+     * the workflow's domain.
+     *
+     * @param list<Domain> $domains
+     */
+    private function selectDestinationDomain(array $domains, ?string $destinationDomain): ?Domain
+    {
+        $destinationDomain = trim((string) $destinationDomain);
+        if ($destinationDomain === '') {
+            return null;
+        }
+
+        foreach ($domains as $domain) {
+            if (strcasecmp($domain->domain, $destinationDomain) === 0) {
+                return $domain;
+            }
+        }
+
+        return null;
     }
 
     public function sslStatus(string $domain): DomainSslResult

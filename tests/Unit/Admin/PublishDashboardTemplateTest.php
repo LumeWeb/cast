@@ -10,6 +10,7 @@ use LumeWeb\Cast\Admin\DomainDnsResult;
 use LumeWeb\Cast\Admin\DomainListResult;
 use LumeWeb\Cast\Admin\DomainSslResult;
 use LumeWeb\Cast\Admin\PublishDashboardView;
+use LumeWeb\Cast\Admin\PublishDestinationView;
 use LumeWeb\Cast\Admin\PublishStatus;
 use LumeWeb\Cast\Ipfs\CheckInfo;
 use LumeWeb\Cast\Ipfs\DelegationInfo;
@@ -29,16 +30,824 @@ use LumeWeb\Cast\Portal\SelfIdentification;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The publish dashboard template is the escaped output boundary for the
- * Publish admin page: it renders the {@see PublishDashboardView} state — run
- * label, stage, progress, published identity, drift, readiness, environment
- * problems and mode — through the shared {@see ViewRenderer}. Every dynamic
- * value is escaped by the template itself, so a hostile status (a crafted CI
- * D, website name, last error or env problem) can never reach the admin page
- * as executable markup. These tests pin that escaped surface.
+ * The publish admin page is the escaped output boundary for the approved
+ * publishing-destination layout (plans/publishing-destination-redesign.md):
+ *
+ *   1. Your site address  — the durable address summary, or the "choose an
+ *      address" prompt + the inline address wizard (three radio/card choices,
+ *      branch-specific fields, plain review + confirm).
+ *   2. Your publish       — the operational center: state chip, progress,
+ *      last published, Publish changes / Cancel / Finish publishing.
+ *   3. Connect your domain — ONLY for a custom domain: the selected domain's
+ *      DNS steps with copy controls, check-again, certificate status.
+ *   4. When to publish    — native publish-trigger radios.
+ *   5. Your Pinner account — supporting account/workspace information.
+ *
+ * Every dynamic value is escaped by the template itself, so a hostile status
+ * (a crafted CID, website name, last error, env problem or destination field)
+ * can never reach the admin page as executable markup. The parked
+ * post-upload website card and the diagnostics-only Domain/Actions panel are
+ * gone: platform and existing destinations never receive registrar/DNS setup
+ * copy, and the DNS block is scoped to the destination's own domain — never an
+ * implicit list pick.
  */
 final class PublishDashboardTemplateTest extends TestCase
 {
+    /* --------------------------- the approved layout ---------------------- */
+
+    public function testRendersTheApprovedFiveSectionLayoutForAPublishedPlatformSite(): void
+    {
+        $output = $this->render($this->view([
+            'runStatus' => RunStatus::Completed,
+            'runStage' => RunStage::Finished,
+            'identity' => new PublishIdentity(
+                websiteId: 'w-1',
+                websiteName: 'Example Site',
+                ipnsKeyId: 'k-1',
+                ipnsKeyName: 'key-one',
+                ready: true,
+            ),
+            'connection' => $this->resolvedConnection('Ada Lovelace', 'ada@example.test', 'main', 'main.example.test'),
+        ]));
+
+        // The page leads with the durable address, then the publish workflow.
+        self::assertStringContainsString('Your site address', $output);
+        self::assertStringContainsString('Your publish', $output);
+        self::assertStringContainsString('When to publish', $output);
+        self::assertStringContainsString('Your Pinner account', $output);
+
+        // A platform destination never receives a custom-domain surface.
+        self::assertStringNotContainsString('Connect your domain', $output);
+        self::assertStringNotContainsString('nameservers at your registrar', $output);
+
+        // The removed surfaces are gone from the page entirely.
+        self::assertStringNotContainsString('cast-website-card', $output);
+        self::assertStringNotContainsString('cast-domain-panel', $output);
+        self::assertStringNotContainsString('cast-domain-actions', $output);
+        self::assertStringNotContainsString('Publish to Pinner needs a website.', $output);
+
+        // The old free-standing Readiness card is folded into "Your publish".
+        self::assertStringNotContainsString('cast-publish-readiness"', $output);
+    }
+
+    public function testHeaderLeadsWithThePlainPageIntro(): void
+    {
+        $output = $this->render($this->view());
+
+        self::assertStringContainsString('>Publish<', $output);
+        self::assertStringContainsString('Put your latest changes online.', $output);
+    }
+
+    /* ---------------------------- your site address ----------------------- */
+
+    public function testAddressCardOffersChooseAddressWhenNoDestinationIsSet(): void
+    {
+        $output = $this->render($this->view(['destination' => null]));
+
+        self::assertStringContainsString('cast-address-card', $output);
+        self::assertStringContainsString('Choose an address for your site.', $output);
+        // The prompt is a real button (semantic, keyboard-reachable).
+        self::assertMatchesRegularExpression(
+            '/<button[^>]*data-cast-address-action="choose"[^>]*>Choose address<\/button>/',
+            $output,
+            'the choose-address prompt must be a button with the choose action',
+        );
+        // No address summary is implied while nothing is set.
+        self::assertStringNotContainsString('cast-address-value', $output);
+        self::assertStringNotContainsString('Your address stays the same', $output);
+    }
+
+    public function testAddressCardShowsSourceLabelAddressAndDurableNoteWhenSet(): void
+    {
+        $output = $this->render($this->view([
+            'destination' => new PublishDestinationView('draft', [
+                'source' => 'platform', 'domain' => null, 'namespace' => null,
+                'dns_hosting_enabled' => true, 'platform_domain' => 'pinner.xyz',
+                'platform_namespace' => 'icann', 'generate' => false, 'label' => 'my-site',
+                'website_id' => null,
+            ]),
+        ]));
+
+        self::assertStringContainsString('cast-address-source-platform', $output);
+        self::assertStringContainsString('Pinner address', $output);
+        self::assertStringContainsString('my-site.pinner.xyz', $output);
+        self::assertStringContainsString('Your address stays the same after your first publish.', $output);
+        // While the choice is still a draft the address may be reviewed.
+        self::assertStringContainsString('data-cast-address-action="review"', $output);
+        self::assertStringContainsString('Review address', $output);
+    }
+
+    public function testConfirmedDestinationShowsAFrozenSummaryWithoutReviewEntry(): void
+    {
+        $output = $this->render($this->view([
+            'destination' => new PublishDestinationView('confirmed', [
+                'source' => 'custom', 'domain' => 'shop.example.com', 'namespace' => 'icann',
+                'dns_hosting_enabled' => true, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => null, 'label' => null,
+                'website_id' => null,
+            ]),
+        ]));
+
+        // The concise frozen summary keeps the source label and the address.
+        self::assertStringContainsString('Your own domain', $output);
+        self::assertStringContainsString('shop.example.com', $output);
+        // …and says the choice is frozen.
+        self::assertStringContainsString('Your address is confirmed and can no longer be changed.', $output);
+        // …with NO review/edit wizard entry.
+        self::assertStringNotContainsString('Review address', $output);
+        self::assertStringNotContainsString('data-cast-address-action="review"', $output);
+    }
+
+    public function testSetupReadinessStatesTheOnboardingInstructionOnce(): void
+    {
+        $output = $this->render($this->view(['onboardingComplete' => false]));
+
+        // One clear instruction: the context line. The readiness line must
+        // not repeat it verbatim beside it.
+        self::assertSame(1, substr_count($output, 'Finish onboarding to publish your site.'));
+        self::assertStringNotContainsString('>Finish onboarding to publish<', $output);
+        self::assertMatchesRegularExpression(
+            '/cast-publish-readiness-level[^>]*hidden/',
+            $output,
+            'the readiness line is hidden while onboarding is outstanding',
+        );
+    }
+
+    public function testSkippedOnboardingNeverInstructsFinishingIt(): void
+    {
+        $output = $this->render($this->view([
+            'onboardingComplete' => false,
+            'onboardingSkipped' => true,
+        ]));
+
+        // The user deliberately skipped onboarding: the page must never
+        // instruct them to finish it, and says the truthful next step.
+        self::assertStringNotContainsString('Finish onboarding to publish your site.', $output);
+        self::assertStringNotContainsString('>Finish onboarding to publish<', $output);
+        self::assertStringContainsString(
+            'You skipped onboarding, so there is nothing to finish — publish your site whenever you are ready.',
+            $output,
+        );
+    }
+
+    public function testAddressCardNamesTheCustomDomainSource(): void
+    {
+        $output = $this->render($this->view([
+            'destination' => new PublishDestinationView('confirmed', [
+                'source' => 'custom', 'domain' => 'shop.example.com', 'namespace' => 'icann',
+                'dns_hosting_enabled' => true, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => null, 'label' => null,
+                'website_id' => null,
+            ]),
+        ]));
+
+        self::assertStringContainsString('cast-address-source-custom', $output);
+        self::assertStringContainsString('Your own domain', $output);
+        self::assertStringContainsString('shop.example.com', $output);
+    }
+
+    public function testAddressCardNamesTheExistingSiteSource(): void
+    {
+        $output = $this->render($this->view([
+            'destination' => new PublishDestinationView('created_or_attached', [
+                'source' => 'existing', 'domain' => 'sub.example.com', 'namespace' => null,
+                'dns_hosting_enabled' => null, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => null, 'label' => null,
+                'website_id' => '66',
+            ]),
+        ]));
+
+        self::assertStringContainsString('cast-address-source-existing', $output);
+        self::assertStringContainsString('Existing Pinner site', $output);
+        self::assertStringContainsString('sub.example.com', $output);
+    }
+
+    public function testReviewAddressIsWithheldOnceTheSiteIsPublished(): void
+    {
+        $output = $this->render($this->view([
+            'runStatus' => RunStatus::Completed,
+            'runStage' => RunStage::Finished,
+            'identity' => new PublishIdentity(
+                websiteId: 'w-1',
+                websiteName: 'Example Site',
+                ipnsKeyId: 'k-1',
+                ipnsKeyName: 'key-one',
+                ready: true,
+            ),
+        ]));
+
+        // Once the address is live there is nothing left to review.
+        self::assertStringNotContainsString('Review address', $output);
+        self::assertStringNotContainsString('data-cast-address-action="review"', $output);
+    }
+
+    public function testEscapesHostileDestinationValuesInTheAddressCard(): void
+    {
+        $output = $this->render($this->view([
+            'destination' => new PublishDestinationView('confirmed', [
+                'source' => 'custom', 'domain' => 'shop<ex>.com', 'namespace' => 'icann',
+                'dns_hosting_enabled' => true, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => null, 'label' => null,
+                'website_id' => null,
+            ]),
+        ]));
+
+        self::assertStringContainsString('shop&lt;ex&gt;.com', $output);
+        self::assertStringNotContainsString('shop<ex>.com', $output);
+        self::assertStringNotContainsString('<script>', $output);
+    }
+
+    /* -------------------------------- the wizard -------------------------- */
+
+    public function testWizardRendersThreeSourceChoicesWithBranchSpecificFields(): void
+    {
+        $output = $this->render($this->view(['destination' => null]));
+
+        // The wizard is present in the server render (hidden) so the no-JS
+        // prompt and the JS flow share one markup.
+        self::assertStringContainsString('data-cast-address-wizard', $output);
+        self::assertMatchesRegularExpression(
+            '/data-cast-address-wizard[^>]*hidden|hidden[^>]*data-cast-address-wizard/',
+            $output,
+            'the wizard renders hidden until opened',
+        );
+
+        // Three native radio choices — semantic, keyboard-traversable.
+        self::assertSame(3, substr_count($output, 'name="cast-address-source"'), 'exactly three source radios');
+        self::assertStringContainsString('value="platform"', $output);
+        self::assertStringContainsString('value="custom"', $output);
+        self::assertStringContainsString('value="existing"', $output);
+        self::assertStringContainsString('Get a free Pinner address', $output);
+        self::assertStringContainsString('Use a domain you own', $output);
+        self::assertStringContainsString('Use a Pinner site you already have', $output);
+
+        // Branch (platform): NO fields at all — the address is generated,
+        // so there is no ambiguous optional name to fill in.
+        self::assertStringNotContainsString('cast-address-platform-label', $output);
+        self::assertStringNotContainsString('Name for your address', $output);
+
+        // The branches are keyed by the data-cast-address-branch attribute the
+        // orchestrator reveals per selected source.
+        self::assertStringContainsString('data-cast-address-branch="platform"', $output);
+        self::assertStringContainsString('data-cast-address-branch="custom"', $output);
+        self::assertStringContainsString('data-cast-address-branch="existing"', $output);
+
+        // Branch (custom): the domain, the namespace choice and the DNS mode.
+        self::assertStringContainsString('id="cast-address-custom-domain"', $output);
+        self::assertStringContainsString('id="cast-address-custom-namespace"', $output);
+        self::assertStringContainsString('value="icann"', $output);
+        self::assertStringContainsString('value="hns"', $output);
+        self::assertStringContainsString('Let Pinner handle DNS', $output);
+        self::assertStringContainsString('I will handle DNS', $output);
+
+        // Branch (existing): a native select of the account's sites, with
+        // distinct loading / error / empty states (never a silent no-op).
+        self::assertStringContainsString('id="cast-address-existing-website"', $output);
+        self::assertStringContainsString('cast-address-existing-loading', $output);
+        self::assertStringContainsString('cast-address-existing-error', $output);
+
+        // The plain final review — a single read-out line the orchestrator
+        // keeps in step: no re-typing of the domain, and a generated platform
+        // address is never phrased as "available at …".
+        self::assertStringContainsString('cast-address-review-copy', $output);
+        self::assertStringNotContainsString('cast-address-review-address', $output);
+        self::assertStringNotContainsString('Your site will be available at', $output);
+        // The confirm is a real button (its label is readiness-dependent and
+        // pinned by testConfirmButtonClaimsPublishOnlyWhenFirstPublishIsReady).
+        self::assertMatchesRegularExpression(
+            '/<button[^>]*data-cast-address-action="confirm"[^>]*>/',
+            $output,
+            'the confirm is a real button',
+        );
+    }
+
+    public function testConfirmButtonClaimsPublishOnlyWhenFirstPublishIsReady(): void
+    {
+        // Publish-ready (confirmed destination, eligible content, no run,
+        // no identity): the confirm names the publish its click will start.
+        $ready = $this->render($this->view());
+
+        self::assertMatchesRegularExpression(
+            '/<button[^>]*data-cast-address-action="confirm"[^>]*>Create address and publish<\/button>/',
+            $ready,
+            'a publish-ready site promises create AND publish',
+        );
+
+        // Not publish-ready (fresh local site, no eligible content): the
+        // server's first-publish gate will refuse a start, so the button must
+        // only name what the click does — create the address.
+        $blocked = $this->render($this->view([
+            'destination' => null,
+            'hasEligibleContent' => false,
+        ]));
+
+        self::assertMatchesRegularExpression(
+            '/<button[^>]*data-cast-address-action="confirm"[^>]*>Create address<\/button>/',
+            $blocked,
+            'a not-ready site promises only the address',
+        );
+        self::assertStringNotContainsString('Create address and publish', $blocked);
+    }
+
+    public function testPlatformWizardBranchHasNoNameFieldAndTheReviewPromisesACreatedFreeAddress(): void
+    {
+        $output = $this->render($this->view(['destination' => null]));
+
+        // The generated platform branch carries no optional name field…
+        self::assertStringNotContainsString('cast-address-platform-label', $output);
+        self::assertStringNotContainsString('Name for your address', $output);
+
+        // …and the review confirmation says Pinner will CREATE a free
+        // address — never "available at A free Pinner address".
+        self::assertStringContainsString('Pinner will create a free address for your site.', $output);
+        self::assertStringNotContainsString('available at A free Pinner address', $output);
+    }
+
+    public function testWizardIsPrefilledFromAPersistedDraft(): void
+    {
+        $output = $this->render($this->view([
+            'destination' => new PublishDestinationView('draft', [
+                'source' => 'custom', 'domain' => 'shop.example.com', 'namespace' => 'hns',
+                'dns_hosting_enabled' => false, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => null, 'label' => null,
+                'website_id' => null,
+            ]),
+        ]));
+
+        // A refresh never loses the unconfirmed choice: the wizard carries it.
+        self::assertStringContainsString('value="shop.example.com"', $output);
+        self::assertMatchesRegularExpression(
+            '/<option[^>]*value="hns"[^>]*selected/',
+            $output,
+            'the draft namespace is preselected',
+        );
+    }
+
+    public function testNewCustomDraftDefaultsToPinnerManagedDns(): void
+    {
+        // A custom draft with no explicit dns_hosting_enabled yet: the portal
+        // default is managed, so the wizard must default to it too.
+        $output = $this->render($this->view([
+            'destination' => new PublishDestinationView('draft', [
+                'source' => 'custom', 'domain' => 'shop.example.com', 'namespace' => 'icann',
+                'dns_hosting_enabled' => null, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => null, 'label' => null,
+                'website_id' => null,
+            ]),
+        ]));
+
+        self::assertMatchesRegularExpression(
+            '/<input[^>]*name="cast-address-dns"[^>]*value="managed"[^>]*checked/',
+            $output,
+            'a first-time custom choice defaults to Pinner-managed DNS (dns_hosting_enabled=true)',
+        );
+        self::assertMatchesRegularExpression(
+            '/<input[^>]*name="cast-address-dns"[^>]*value="self"(?![^>]*checked)/',
+            $output,
+            'self-managed DNS is not the default for a first-time custom choice',
+        );
+    }
+
+    public function testSelfManagedDnsIsTuckedUnderAnAdvancedDisclosure(): void
+    {
+        $output = $this->render($this->view(['destination' => null]));
+
+        self::assertMatchesRegularExpression(
+            '/<details[^>]*cast-address-advanced.*?<summary[^>]*>Advanced<\/summary>.*?value="self".*?<\/details>/s',
+            $output,
+            'the self-managed choice sits behind an explicit Advanced disclosure',
+        );
+        self::assertMatchesRegularExpression(
+            '/<details[^>]*cast-address-advanced(?![^>]*open)/',
+            $output,
+            'the disclosure is closed by default so the advanced choice is hidden',
+        );
+    }
+
+    public function testWizardRendersNamespaceSpecificDnsCopy(): void
+    {
+        $icann = $this->render($this->view(['destination' => null]));
+
+        self::assertStringContainsString('data-cast-namespace-note="icann"', $icann);
+        self::assertStringContainsString('data-cast-namespace-note="hns"', $icann);
+        self::assertMatchesRegularExpression(
+            '/data-cast-namespace-note="icann"(?![^>]*hidden)/',
+            $icann,
+            'the ICANN note is the one shown for the default namespace',
+        );
+        self::assertMatchesRegularExpression(
+            '/data-cast-namespace-note="hns"[^>]*hidden/',
+            $icann,
+            'the HNS note is hidden until the namespace is HNS',
+        );
+        self::assertStringContainsString('on-chain', $icann, 'the HNS copy explains the on-chain parent records');
+        self::assertMatchesRegularExpression('/nameserver/i', $icann, 'the HNS copy mentions the nameserver guidance');
+
+        $hns = $this->render($this->view([
+            'destination' => new PublishDestinationView('draft', [
+                'source' => 'custom', 'domain' => 'acme.example', 'namespace' => 'hns',
+                'dns_hosting_enabled' => true, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => null, 'label' => null,
+                'website_id' => null,
+            ]),
+        ]));
+
+        self::assertMatchesRegularExpression(
+            '/data-cast-namespace-note="hns"(?![^>]*hidden)/',
+            $hns,
+            'the HNS note is shown for an HNS draft',
+        );
+        self::assertMatchesRegularExpression(
+            '/data-cast-namespace-note="icann"[^>]*hidden/',
+            $hns,
+            'the ICANN note hides for an HNS draft',
+        );
+    }
+
+    public function testWizardOffersNoHip5AsAPreCreateChoice(): void
+    {
+        $output = $this->render($this->view(['destination' => null]));
+
+        self::assertStringNotContainsString(
+            'HIP-5',
+            strtoupper($output),
+            'HIP-5 is a post-binding server state — never a pre-create choice',
+        );
+    }
+
+    public function testWizardHasNoClickBoundListItemControls(): void
+    {
+        $output = $this->render($this->view(['destination' => null]));
+
+        // No clickable list items anywhere in the address surface: every
+        // control is a native button, radio, input or select.
+        self::assertStringNotContainsString('data-website-action', $output);
+        self::assertStringNotContainsString('cast-domain-row', $output);
+        self::assertStringNotContainsString('<li', $output);
+    }
+
+    /* -------------------------- connect your domain ----------------------- */
+
+    public function testConnectYourDomainCardRendersOnlyForCustomDestinations(): void
+    {
+        $custom = $this->render($this->view([
+            'destination' => new PublishDestinationView('created_or_attached', [
+                'source' => 'custom', 'domain' => 'shop.example.com', 'namespace' => 'icann',
+                'dns_hosting_enabled' => true, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => null, 'label' => null,
+                'website_id' => null,
+            ]),
+        ]));
+
+        self::assertStringContainsString('cast-domain-setup-card', $custom);
+        self::assertStringContainsString('Connect your domain', $custom);
+        // The card is scoped to the chosen domain, named verbatim.
+        self::assertStringContainsString('shop.example.com', $custom);
+        self::assertStringContainsString('I made the changes — check again', $custom);
+        self::assertStringContainsString('Security certificate', $custom);
+
+        foreach (['platform', 'existing'] as $source) {
+            $output = $this->render($this->view([
+                'destination' => new PublishDestinationView('created_or_attached', [
+                    'source' => $source, 'domain' => $source === 'existing' ? 'sub.example.com' : null,
+                    'namespace' => null, 'dns_hosting_enabled' => null,
+                    'platform_domain' => 'pinner.xyz', 'platform_namespace' => 'icann',
+                    'generate' => true, 'label' => null,
+                    'website_id' => $source === 'existing' ? '66' : null,
+                ]),
+            ]));
+
+            self::assertStringNotContainsString('Connect your domain', $output, $source . ' must not show the domain card');
+            self::assertStringNotContainsString('cast-domain-setup-card', $output);
+            self::assertStringNotContainsString('nameservers at your registrar', $output);
+            self::assertStringNotContainsString('Security certificate', $output);
+        }
+    }
+
+    public function testConnectCardShowsDnsGuidanceOnlyForTheSelectedDomain(): void
+    {
+        $guidance = $this->dnsDomainView(
+            new Domain(
+                '9',
+                'shop.example.com',
+                'icann',
+                true,
+                'waiting_delegation',
+                'gw.example.com',
+                DelegationInfo::fromArray([
+                    'mode' => null,
+                    'nameservers' => ['ns1.pinner.xyz', 'ns2.pinner.xyz'],
+                    'dnssec' => 'secure',
+                    'dnssec_error' => null,
+                    'parent_records' => [
+                        ['type' => 'NS', 'value' => 'ns1.pinner.xyz,ns2.pinner.xyz'],
+                        ['type' => 'DS', 'value' => '12345 8 2 ABCDEF'],
+                    ],
+                    'authoritative_records' => [],
+                ]),
+            ),
+        );
+
+        // A matching delegation bundle renders inside the connect card…
+        $output = $this->render($this->view([
+            'destination' => new PublishDestinationView('created_or_attached', [
+                'source' => 'custom', 'domain' => 'shop.example.com', 'namespace' => 'icann',
+                'dns_hosting_enabled' => true, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => null, 'label' => null,
+                'website_id' => null,
+            ]),
+        ]), $guidance);
+        self::assertStringContainsString('Parent records (configure at your registrar)', $output);
+
+        // …and a bundle for a DIFFERENT domain never leaks in — the card shows
+        // only the destination's own domain, never an implicit list pick.
+        $other = $this->render($this->view([
+            'destination' => new PublishDestinationView('created_or_attached', [
+                'source' => 'custom', 'domain' => 'shop.example.com', 'namespace' => 'icann',
+                'dns_hosting_enabled' => true, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => null, 'label' => null,
+                'website_id' => null,
+            ]),
+        ]), $this->dnsDomainView(
+            new Domain('10', 'other.example.com', 'icann', true, 'waiting_delegation', 'gw.example.com'),
+        ));
+        self::assertStringNotContainsString('Parent records (configure at your registrar)', $other);
+        self::assertStringNotContainsString('other.example.com', $other);
+    }
+
+    public function testConnectCardCarriesTheValidateActionForTheSelectedDomain(): void
+    {
+        $domain = new Domain('9', 'shop.example.com', 'icann', true, 'waiting_delegation', 'gw.example.com');
+
+        $output = $this->render($this->view([
+            'destination' => new PublishDestinationView('created_or_attached', [
+                'source' => 'custom', 'domain' => 'shop.example.com', 'namespace' => 'icann',
+                'dns_hosting_enabled' => false, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => null, 'label' => null,
+                'website_id' => null,
+            ]),
+        ]), $this->dnsDomainView($domain));
+
+        // The check-again action is a real button carrying the selected
+        // domain's id (the matched list row), never an implicit pick.
+        self::assertMatchesRegularExpression(
+            '/<button[^>]*data-domain-action="validate"[^>]*data-domain-id="9"/',
+            $output,
+        );
+        self::assertStringContainsString('I made the changes — check again', $output);
+    }
+
+    public function testConnectCardOffersCopyControlsBesideTheDnsValues(): void
+    {
+        $domain = new Domain(
+            '9',
+            'shop.example.com',
+            'icann',
+            true,
+            'waiting_delegation',
+            'gw.example.com',
+            DelegationInfo::fromArray([
+                'mode' => null,
+                'nameservers' => ['ns1.pinner.xyz', 'ns2.pinner.xyz'],
+                'dnssec' => 'secure',
+                'dnssec_error' => null,
+                'parent_records' => [
+                    ['type' => 'NS', 'value' => 'ns1.pinner.xyz,ns2.pinner.xyz'],
+                    ['type' => 'DS', 'value' => '12345 8 2 ABCDEF'],
+                ],
+                'authoritative_records' => [],
+            ]),
+        );
+
+        $output = $this->render($this->view([
+            'destination' => new PublishDestinationView('created_or_attached', [
+                'source' => 'custom', 'domain' => 'shop.example.com', 'namespace' => 'icann',
+                'dns_hosting_enabled' => true, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => null, 'label' => null,
+                'website_id' => null,
+            ]),
+        ]), $this->dnsDomainView($domain));
+
+        // Every rendered DNS value gets a copy control beside it.
+        self::assertStringContainsString('data-cast-copy="ns1.pinner.xyz"', $output);
+        self::assertStringContainsString('data-cast-copy="12345 8 2 ABCDEF"', $output);
+        self::assertMatchesRegularExpression(
+            '/<button[^>]*class="[^"]*cast-domain-copy[^"]*"[^>]*data-cast-copy="ns1\.pinner\.xyz"/',
+            $output,
+            'copy controls are real buttons',
+        );
+    }
+
+    /* ------------------------- DNS guidance in the card ------------------- */
+
+    public function testRendersManagedIcannDnsGuidanceWithNameTypeValueTable(): void
+    {
+        $domain = new Domain(
+            '9',
+            'site.example.test',
+            'icann',
+            true,
+            'waiting_delegation',
+            'gw.example.com',
+            DelegationInfo::fromArray([
+                'mode' => null,
+                'nameservers' => ['ns1.pinner.xyz', 'ns2.pinner.xyz'],
+                'dnssec' => 'secure',
+                'dnssec_error' => null,
+                'parent_records' => [
+                    ['type' => 'NS', 'value' => 'ns1.pinner.xyz,ns2.pinner.xyz'],
+                    ['type' => 'DS', 'value' => '12345 8 2 ABCDEF'],
+                ],
+                'authoritative_records' => [],
+            ]),
+        );
+
+        $output = $this->render($this->customDestinationView('site.example.test'), $this->dnsDomainView($domain));
+
+        // The managed ICANN guidance copy lands verbatim (apostrophes escaped).
+        self::assertStringContainsString('Update your domain&#039;s nameservers at your registrar.', $output);
+        self::assertStringContainsString('Point your registrar&#039;s nameservers to the records below.', $output);
+        self::assertStringContainsString('Pinner manages your DNS, so the authoritative side is handled for you.', $output);
+        self::assertStringContainsString('Parent records (configure at your registrar)', $output);
+
+        // The NAME/TYPE/VALUE nameserver table with each Pinner nameserver.
+        self::assertStringContainsString('>Name<', $output);
+        self::assertStringContainsString('>Type<', $output);
+        self::assertStringContainsString('>Value<', $output);
+        self::assertStringContainsString('>ns1.pinner.xyz<', $output);
+        self::assertStringContainsString('>ns2.pinner.xyz<', $output);
+        // The parent records DS value renders verbatim.
+        self::assertStringContainsString('>12345 8 2 ABCDEF<', $output);
+        // DNSSEC state renders verbatim, never computed.
+        self::assertStringContainsString('DNSSEC: secure', $output);
+        self::assertStringNotContainsString('DNSSEC error', $output);
+        // Managed DNS never asks the operator to add/validate the records.
+        self::assertStringNotContainsString('Add the DNS records shown above at your registrar, then validate.', $output);
+        // No generic actions list survives in the card.
+        self::assertStringNotContainsString('cast-domain-actions', $output);
+    }
+
+    public function testRendersManagedHnsDnsGuidanceOnChainWithNameserversAndDnssecError(): void
+    {
+        $domain = new Domain(
+            '9',
+            'name/',
+            'hns',
+            true,
+            'waiting_delegation',
+            'gw.example.com',
+            DelegationInfo::fromArray([
+                'mode' => 'inline',
+                'nameservers' => ['ns1.pinner.xyz', 'ns2.pinner.xyz'],
+                'dnssec' => 'secure',
+                'dnssec_error' => 'dnssec-broken',
+                'parent_records' => [
+                    ['type' => 'NS', 'value' => 'ns1.pinner.xyz,ns2.pinner.xyz'],
+                    ['type' => 'DS', 'value' => '12345 8 2 ABCDEF'],
+                ],
+                'authoritative_records' => [],
+            ]),
+        );
+
+        $output = $this->render($this->customDestinationView('name/'), $this->dnsDomainView($domain));
+
+        self::assertStringContainsString(
+            'Publish the records below in the DNS/records area of your HNS wallet (on-chain).',
+            $output,
+        );
+        self::assertStringContainsString('The authoritative side is served via Pinner&#039;s synthetic nameservers.', $output);
+        self::assertStringContainsString('Parent records (publish in your HNS wallet)', $output);
+
+        // Comma-joined nameserver values split onto their own rows.
+        self::assertStringContainsString('>ns1.pinner.xyz<', $output);
+        self::assertStringContainsString('>ns2.pinner.xyz<', $output);
+
+        // The HNS nameservers list renders (the NAME/TYPE/VALUE table was not).
+        self::assertStringContainsString('Nameservers', $output);
+        // DNSSEC state AND error render verbatim, never computed.
+        self::assertStringContainsString('DNSSEC: secure', $output);
+        self::assertStringContainsString('DNSSEC error: dnssec-broken', $output);
+    }
+
+    public function testRendersOnchainManagedHnsDnsGuidanceWithoutPinnerManagesClaim(): void
+    {
+        // An HNS binding the server reports as onchain_managed: its DNS is
+        // served by an external on-chain contract, so there is no Pinner-managed
+        // zone to point at. The card must never claim Pinner manages the DNS and
+        // must show only the server-returned DNSLink/TLSA guidance.
+        $domain = new Domain(
+            '9',
+            'name/',
+            'hns',
+            true,
+            'onchain_managed',
+            'gw.example.com',
+            null,
+            [
+                CheckInfo::fromArray([
+                    'name' => 'dnslink',
+                    'ok' => false,
+                    'message' => '',
+                    'expected' => 'dnslink=/ipns/k-ipns-7',
+                    'found' => '',
+                ]),
+                CheckInfo::fromArray([
+                    'name' => 'tlsa',
+                    'ok' => false,
+                    'message' => '',
+                    'expected' => '_443._tcp.name/ TLSA 3 1 1 abcdef',
+                    'found' => '',
+                ]),
+            ],
+        );
+
+        $output = $this->render($this->customDestinationView('name/'), $this->dnsDomainView($domain));
+
+        // The on-chain-managed explanation renders…
+        self::assertStringContainsString('This domain is managed on-chain, so its DNS records are set on-chain, not by Pinner.', $output);
+        // …and the binding is never claimed to be Pinner-managed.
+        self::assertStringNotContainsString('Pinner manages your DNS', $output);
+        self::assertStringNotContainsString('the authoritative side is handled for you', $output);
+        // The managed-HNS / self-managed delegation framing is absent.
+        self::assertStringNotContainsString('Publish the records below in the DNS/records area of your HNS wallet', $output);
+        // The server-returned DNSLink and TLSA guidance is shown verbatim.
+        self::assertStringContainsString('dnslink=/ipns/k-ipns-7', $output);
+        self::assertStringContainsString('_443._tcp.name/ TLSA 3 1 1 abcdef', $output);
+    }
+
+    public function testRendersSelfManagedDnsGuidanceWithChecksRows(): void
+    {
+        // Self-managed: the operator configures the records at the registrar,
+        // points their own DNS server at the authoritative records, then
+        // validates. The per-record values are the server-computed checks.
+        $domain = new Domain(
+            '9',
+            'site.example.test',
+            'icann',
+            false,
+            'waiting_delegation',
+            'gw.example.com',
+            DelegationInfo::fromArray([
+                'mode' => null,
+                'nameservers' => [],
+                'dnssec' => '',
+                'dnssec_error' => null,
+                'parent_records' => [],
+                'authoritative_records' => [
+                    ['type' => 'TXT', 'value' => 'pinner-verify=AbCdEf123456', 'ns' => null],
+                ],
+            ]),
+            [
+                CheckInfo::fromArray([
+                    'name' => 'pinner-verify',
+                    'ok' => false,
+                    'message' => '',
+                    'expected' => 'pinner-verify=AbCdEf123456',
+                    'found' => '',
+                ]),
+                CheckInfo::fromArray([
+                    'name' => 'dnslink',
+                    'ok' => false,
+                    'message' => '',
+                    'expected' => 'dnslink=/ipns/k-ipns-7',
+                    'found' => 'dnslink=/ipfs/QmWrong',
+                ]),
+            ],
+        );
+
+        $output = $this->render(
+            $this->customDestinationView('site.example.test', dnsHostingEnabled: false),
+            $this->dnsDomainView($domain),
+        );
+
+        self::assertStringContainsString('Configure the parent records at your registrar, then point your DNS server at the authoritative records below.', $output);
+        self::assertStringContainsString('Authoritative records (configure on your DNS server)', $output);
+        self::assertStringContainsString('>pinner-verify=AbCdEf123456<', $output);
+        self::assertStringContainsString('Add the DNS records shown above at your registrar, then validate.', $output);
+
+        // The server-computed per-record checks with the exact publish/found rows.
+        self::assertStringContainsString('Validation checks', $output);
+        self::assertStringContainsString('Publish this record:', $output);
+        self::assertStringContainsString('>pinner-verify=AbCdEf123456<', $output);
+        self::assertStringContainsString('Found instead:', $output);
+        self::assertStringContainsString('>dnslink=/ipns/k-ipns-7<', $output);
+        self::assertStringContainsString('>dnslink=/ipfs/QmWrong<', $output);
+    }
+
+    public function testRendersNoDelegationMessageWhenTheBundleIsAbsent(): void
+    {
+        // A bound domain without a delegation block yet (the portal has not
+        // produced records) says so plainly instead of implying records exist.
+        $domain = new Domain('9', 'name/', 'hns', true, 'waiting_delegation', 'gw.example.com');
+
+        $output = $this->render($this->customDestinationView('name/'), $this->dnsDomainView($domain));
+
+        self::assertStringContainsString('No delegation records are available for name/.', $output);
+        self::assertStringContainsString('Publish the delegation records below', $output);
+    }
+
+    /* ------------------------------ your publish -------------------------- */
+
     public function testRendersPublishedStateEscapingCidSiteNameAndProgress(): void
     {
         $output = $this->render($this->view([
@@ -68,12 +877,44 @@ final class PublishDashboardTemplateTest extends TestCase
 
         // Hostile identity data the template must escape, never echo raw.
         self::assertStringContainsString('QmExample&lt;Cid&gt;', $output);
-        // The connected website renders as a labelled "Website: <name>" line
-        // (the clear display the refresh path must always show), escaped too.
         self::assertStringContainsString('Website: &lt;Example&gt; &amp; Co', $output);
         self::assertStringNotContainsString('<Cid>', $output);
         self::assertStringNotContainsString('<Example>', $output);
         self::assertStringNotContainsString('<script>', $output);
+    }
+
+    public function testPublishCardOffersPublishChangesCancelAndFinishActions(): void
+    {
+        $output = $this->render($this->view([
+            'runStatus' => RunStatus::Running,
+            'runStage' => RunStage::Exporting,
+            'runActive' => true,
+            'identity' => new PublishIdentity(
+                websiteId: 'w-1',
+                websiteName: 'Example Site',
+                ipnsKeyId: 'k-1',
+                ipnsKeyName: 'key-one',
+                ready: true,
+            ),
+        ]));
+
+        self::assertStringContainsString('Publish changes', $output);
+        self::assertStringContainsString('Cancel publish', $output);
+
+        // Finish publishing (the artifact resume) is offered for a terminal
+        // run with an identity — the custom-DNS "finish" path.
+        $finished = $this->render($this->view([
+            'runStatus' => RunStatus::Failed,
+            'runStage' => RunStage::Finished,
+            'identity' => new PublishIdentity(
+                websiteId: 'w-1',
+                websiteName: 'Example Site',
+                ipnsKeyId: 'k-1',
+                ipnsKeyName: 'key-one',
+                ready: true,
+            ),
+        ]));
+        self::assertStringContainsString('Finish publishing', $finished);
     }
 
     public function testQueuedStateRendersWaitingContextNotAMisleadingItemCount(): void
@@ -84,37 +925,24 @@ final class PublishDashboardTemplateTest extends TestCase
             'queuedAt' => 5000,
         ]));
 
-        // A queued (not-started) run never advertises "0 items processed": the
-        // honest secondary progress line leads with the tick-cadence ETA and
-        // lands on the waiting copy.
         $cadence = TickConfig::DEFAULT_TICK_INTERVAL_SECONDS;
         self::assertStringContainsString('Starting within ' . $cadence . ' seconds — waiting to begin', $queued);
         self::assertStringContainsString('waiting to begin', $queued);
         self::assertStringNotContainsString('0 items processed', $queued);
 
-        // The queued ETA anchor the client countdown reconciles against:
-        // queuedAt + the tick delivery cadence, rendered as a data attribute
-        // on the progress line (escaped).
         self::assertStringContainsString('data-cast-queued-eta="' . (5000 + $cadence) . '"', $queued);
 
-        // The plain-language queue chip and expected-behavior copy render.
         self::assertStringContainsString('Queued — starting shortly', $queued);
         self::assertStringContainsString(
             'Your publish is queued and will start automatically. Keep working — it runs in the background and this page tracks the progress.',
             $queued,
         );
 
-        // The recovery/start-now escape is rendered (hidden until the client's
-        // wait threshold passes) and funnels through the existing first-publish
-        // start route while no identity exists.
         self::assertStringContainsString('data-cast-escape', $queued);
         self::assertStringContainsString('Start now', $queued);
         self::assertStringContainsString('data-cast-publish-action="start"', $queued);
         self::assertStringContainsString('hidden', $queued);
 
-        // The queued-run trio, exactly as the view model pins it: Cancel
-        // publish is offered while the run is active, and the prominent Publish
-        // button is disabled (empty action) — the escape is the only kick.
         self::assertStringContainsString('Cancel publish', $queued);
         self::assertMatchesRegularExpression(
             '/class="[^"]*cast-publish-primary[^"]*"[^>]*data-cast-publish-action=""[^>]*disabled/',
@@ -134,23 +962,16 @@ final class PublishDashboardTemplateTest extends TestCase
             'progressTotal' => 100,
         ]));
 
-        // A live run names its fine stage with the honest discover denominator —
-        // never the misleading cumulative "items processed" that counts a URL
-        // once per pipeline pass.
         self::assertStringContainsString('Capturing content… (100 URLs)', $output);
         self::assertStringNotContainsString('42 items processed', $output);
         self::assertStringNotContainsString('Waiting to begin', $output);
-        // The discover total is rendered as a data hook for the client/tests.
         self::assertStringContainsString('data-cast-progress-total="100"', $output);
-        // No queued run means no escape affordance at all.
         self::assertStringNotContainsString('cast-publish-escape', $output);
         self::assertStringNotContainsString('Start now', $output);
     }
 
     public function testNoDiscoverTotalRendersNoProgressTotalHook(): void
     {
-        // Before discovery drains (or for an idle surface) there is no
-        // denominator, so the data hook must be absent rather than lie.
         $idle = $this->render($this->view([
             'runStatus' => RunStatus::NotStarted,
             'runStage' => RunStage::Idle,
@@ -176,21 +997,15 @@ final class PublishDashboardTemplateTest extends TestCase
             'identity' => null,
         ]));
 
-        // The status + "why" copy name the cancelled retry honestly.
         self::assertStringContainsString('Cancelled — retry available', $output);
         self::assertStringContainsString('Your last publish was cancelled. Publish to Pinner to start again.', $output);
 
-        // The queued recovery/start-now escape and its line are NEVER offered
-        // for a terminal run — the escape only makes sense while a run queues.
         self::assertStringNotContainsString('cast-publish-escape', $output);
         self::assertStringNotContainsString('Start now', $output);
         self::assertStringNotContainsString('Queued longer than expected', $output);
-
-        // Nothing is active or queued, so Cancel publish is not offered either.
         self::assertStringNotContainsString('cast-publish-cancel', $output);
         self::assertStringNotContainsString('Cancel publish', $output);
 
-        // The prominent action is the re-armed first-publish retry, enabled.
         self::assertMatchesRegularExpression(
             '/class="[^"]*cast-publish-primary[^"]*"[^>]*data-cast-publish-action="start"[^>]*>/',
             $output,
@@ -267,7 +1082,7 @@ final class PublishDashboardTemplateTest extends TestCase
             'lastError' => 'Failed to reach <Pinner> & upload',
         ]));
 
-        // The operator-facing readiness card names the variables and message.
+        // The operator-facing readiness line names the variables and message.
         self::assertStringContainsString('Configuration required', $output);
         self::assertStringContainsString('PORTAL_API_URL', $output);
         self::assertStringContainsString('MALICIOUS&lt;VAR&gt;', $output);
@@ -281,52 +1096,6 @@ final class PublishDashboardTemplateTest extends TestCase
         self::assertStringNotContainsString('<form', $output);
     }
 
-    public function testRendersModeLabelsForEachAvailableMode(): void
-    {
-        self::assertStringContainsString(
-            'Manual publishing',
-            $this->render($this->view(['mode' => PublishMode::Manual])),
-        );
-        self::assertStringContainsString(
-            'Publishes automatically when you update content',
-            $this->render($this->view(['mode' => PublishMode::OnUpdate])),
-        );
-    }
-
-    public function testActiveModeButtonIsSelectedNonActionableWithPerOptionHelp(): void
-    {
-        $output = $this->render($this->view(['mode' => PublishMode::Manual]));
-
-        // The active option is pressed + disabled — visibly selected and
-        // non-actionable — and every option carries its own describedby help.
-        self::assertMatchesRegularExpression(
-            '/data-cast-publish-value="manual"[^>]*aria-pressed="true"[^>]*disabled[^>]*>/',
-            $output,
-            'the active (manual) option must be pressed and disabled',
-        );
-        self::assertMatchesRegularExpression(
-            '/data-cast-publish-value="on_update"[^>]*aria-pressed="false"/',
-            $output,
-        );
-        self::assertStringContainsString('aria-describedby="cast-publish-mode-help-manual"', $output);
-        self::assertStringContainsString('aria-describedby="cast-publish-mode-help-on_update"', $output);
-
-        // The active mode's full end-user help renders as the visible guidance
-        // line, and per-option help spans carry the exact scheduler semantics:
-        // a click queues a background publish (never synchronous), and eligible
-        // content changes queue a debounced/coalesced background publish.
-        self::assertStringContainsString(
-            'Publish only when you choose. Clicking Publish to Pinner queues a background publish — content edits wait until then and nothing publishes on its own.',
-            $output,
-        );
-        self::assertStringContainsString(
-            'Publish automatically. Eligible content changes queue a background publish for you — rapid edits are combined into one debounced publish instead of one per save.',
-            $output,
-        );
-        // The retired Scheduled mode is not offered anywhere in the selector.
-        self::assertStringNotContainsString('scheduled', $output);
-    }
-
     public function testRendersExplicitStateChipLastCheckedAndRefreshControl(): void
     {
         $queued = $this->render($this->view([
@@ -334,9 +1103,6 @@ final class PublishDashboardTemplateTest extends TestCase
             'runActive' => true,
         ]));
 
-        // The explicit queue/run state chip leads the status card, carries the
-        // run-state class for styling and is an accessible live status
-        // (role=status) so screen readers hear each transition.
         self::assertMatchesRegularExpression(
             '/class="cast-publish-state-chip cast-publish-state-queued"[^>]*role="status"[^>]*>/',
             $queued,
@@ -345,13 +1111,9 @@ final class PublishDashboardTemplateTest extends TestCase
         self::assertStringContainsString('Queued — starting shortly', $queued);
         self::assertStringNotContainsString('Publishing', $queued);
 
-        // A live data-refresh timestamp line is always present after the error
-        // block, labelled accessibly.
         self::assertStringContainsString('cast-publish-last-checked', $queued);
         self::assertStringContainsString('Last checked', $queued);
 
-        // The manual Refresh control is always rendered and is a read-only
-        // client control (data-cast-publish-refresh, never a REST action).
         self::assertStringContainsString('Refresh status', $queued);
         self::assertMatchesRegularExpression(
             '/class="[^"]*cast-publish-refresh[^"]*"[^>]*data-cast-publish-refresh/',
@@ -359,7 +1121,6 @@ final class PublishDashboardTemplateTest extends TestCase
         );
         self::assertStringNotContainsString('data-cast-publish-action="refresh"', $queued);
 
-        // A failed terminal run names the retry honestly on the chip.
         $failed = $this->render($this->view([
             'runStatus' => RunStatus::Failed,
             'runStage' => RunStage::Finished,
@@ -370,7 +1131,6 @@ final class PublishDashboardTemplateTest extends TestCase
             $failed,
         );
 
-        // A completed run names the success honestly on the chip.
         $completed = $this->render($this->view([
             'runStatus' => RunStatus::Completed,
             'runStage' => RunStage::Finished,
@@ -382,83 +1142,6 @@ final class PublishDashboardTemplateTest extends TestCase
         );
     }
 
-    public function testModeSelectorIsHiddenWhenModeCannotChange(): void
-    {
-        // Mid-run the mode group (and its help) is not rendered at all, so no
-        // active-mode control is offered while the mode is locked.
-        $output = $this->render($this->view([
-            'runStatus' => RunStatus::Running,
-            'runStage' => RunStage::Exporting,
-            'runActive' => true,
-        ]));
-
-        self::assertStringNotContainsString('cast-publish-mode-options', $output);
-        self::assertStringNotContainsString('aria-pressed=', $output);
-    }
-
-    public function testRendersNoContentReadiness(): void
-    {
-        $output = $this->render($this->view(['hasEligibleContent' => false]));
-
-        self::assertStringContainsString('No publishable content yet', $output);
-    }
-
-    public function testRendersResolvedConnectionCardEscaped(): void
-    {
-        $output = $this->render($this->view([
-            'connection' => $this->resolvedConnection('Ada Lovelace', 'ada<@>example.test', 'main', 'main.example.test'),
-        ]));
-
-        self::assertStringContainsString('cast-connection-card', $output);
-        self::assertStringContainsString('>Connection<', $output);
-        self::assertStringContainsString('Connected', $output);
-        // Identifiers escape hostile characters; never echoed raw.
-        self::assertStringContainsString('ada&lt;@&gt;example.test', $output);
-        self::assertStringNotContainsString('ada<@>example.test', $output);
-        self::assertStringContainsString('main.example.test', $output);
-        self::assertStringContainsString('Ada Lovelace', $output);
-        self::assertStringNotContainsString('<script>', $output);
-    }
-
-    public function testRendersConnectionErrorStateEscapedWithoutCredentials(): void
-    {
-        $output = $this->render($this->view([
-            'connection' => $this->errorConnection(),
-        ]));
-
-        // The value-free operator message renders escaped; the account key or
-        // any credential never reaches the page.
-        self::assertStringContainsString('cast-connection-card', $output);
-        self::assertStringNotContainsString('Connected', $output);
-        self::assertStringContainsString('cast-connection-error', $output);
-        self::assertStringNotContainsString('account-key', $output);
-        self::assertStringNotContainsString('<script>', $output);
-    }
-
-    public function testRendersNoConnectionCardWhenConnectionUnresolvedOrAbsent(): void
-    {
-        $output = $this->render($this->view());
-
-        self::assertStringNotContainsString('cast-connection-card', $output);
-    }
-
-    public function testRendersDomainPanelMarkerWhenProvidedDomainDashboardView(): void
-    {
-        $domainView = DomainDashboardView::fromState(
-            envComplete: true,
-            onboardingComplete: true,
-            hasWebsite: true,
-            selected: false,
-            list: new DomainListResult(true, null, []),
-        );
-
-        $output = $this->render($this->view(), $domainView);
-
-        // As soon as the subscriber hands the choose-a-domain panel its
-        // DomainDashboardView, the publish template must render the panel.
-        self::assertStringContainsString('cast-domain-panel', $output);
-    }
-
     public function testRendersHonestRetryCopyWithEnabledPrimaryForFailedFirstPublish(): void
     {
         $output = $this->render($this->view([
@@ -467,12 +1150,10 @@ final class PublishDashboardTemplateTest extends TestCase
             'lastError' => 'The upload timed out',
         ]));
 
-        // The status names the failure and the context makes the retry honest.
         self::assertStringContainsString('Publish failed', $output);
         self::assertStringContainsString('Your last publish failed. Publish to Pinner to retry.', $output);
         self::assertStringNotContainsString('publish it to Pinner for the first time', $output);
 
-        // The prominent action is the restarted first publish (start), enabled.
         self::assertMatchesRegularExpression(
             '/class="[^"]*cast-publish-primary[^"]*"[^>]*data-cast-publish-action="start"[^>]*>/',
             $output,
@@ -494,8 +1175,6 @@ final class PublishDashboardTemplateTest extends TestCase
             'runStage' => RunStage::Finished,
         ]));
 
-        // Config readiness disables the primary (data action empty + disabled),
-        // and the context explains why rather than offering a retry.
         self::assertStringContainsString('data-cast-publish-action=""', $output);
         self::assertMatchesRegularExpression(
             '/class="[^"]*cast-publish-primary[^"]*"[^>]*disabled[^>]*>/',
@@ -505,251 +1184,8 @@ final class PublishDashboardTemplateTest extends TestCase
         self::assertStringContainsString('Publishing is unavailable until the configuration below is resolved.', $output);
     }
 
-    public function testHidesSslAndDnsSectionsWhenNoWebsiteIdentityExists(): void
+    public function testAwaitingWebsiteNeverRendersTheParkedWebsiteCard(): void
     {
-        $domainView = DomainDashboardView::fromState(
-            envComplete: true,
-            onboardingComplete: true,
-            hasWebsite: false,
-            selected: false,
-            list: new DomainListResult(false, \LumeWeb\Cast\Admin\DomainRefusal::IdentityMissing),
-        );
-
-        $output = $this->render($this->view(), $domainView);
-
-        // The panel explores the publish-first next step, and the SSL/DNS
-        // sections are NOT rendered — no implied selectable domain.
-        self::assertStringContainsString('Publish your site to begin managing domains.', $output);
-        // The publish-first message appears exactly ONCE: the identity-missing
-        // list refusal resolves to the same string as the panel state line, so
-        // the template must not echo the duplicate paragraph.
-        self::assertSame(1, substr_count($output, 'Publish your site to begin managing domains.'));
-        self::assertStringNotContainsString('cast-domain-ssl-label', $output);
-        self::assertStringNotContainsString('cast-domain-dns-label', $output);
-        self::assertStringNotContainsString('Select a domain to view SSL status', $output);
-    }
-
-    public function testKeepsTheListRefusalParagraphWhenItDiffersFromTheStateLabel(): void
-    {
-        // A refusal that says something the state line has not already said
-        // (here the reachability error behind READY state) must KEEP its own
-        // paragraph — the dedupe only drops an identical echo.
-        $domainView = DomainDashboardView::fromState(
-            envComplete: true,
-            onboardingComplete: true,
-            hasWebsite: true,
-            selected: false,
-            list: new DomainListResult(false, \LumeWeb\Cast\Admin\DomainRefusal::RequestFailed),
-        );
-
-        $output = $this->render($this->view(), $domainView);
-
-        self::assertStringContainsString('Choose and manage your domain', $output);
-        self::assertStringContainsString('Pinner could not be reached. Please try again.', $output);
-        self::assertStringContainsString('cast-domain-list-refusal', $output);
-        // The distinct refusal is a different string from the state line, so no
-        // identical duplicate is rendered.
-        self::assertSame(1, substr_count($output, 'Pinner could not be reached. Please try again.'));
-    }
-
-    public function testRendersSslAndDnsSectionsWhenWebsiteIdentityExists(): void
-    {
-        $domainView = DomainDashboardView::fromState(
-            envComplete: true,
-            onboardingComplete: true,
-            hasWebsite: true,
-            selected: false,
-            list: new DomainListResult(true, null, []),
-        );
-
-        $output = $this->render($this->view(), $domainView);
-
-        // A registered website keeps its SSL/DNS sections (with bind-first
-        // guidance when no domain is bound yet), so valid controls stay live.
-        self::assertStringContainsString('cast-domain-ssl-label', $output);
-        self::assertStringContainsString('cast-domain-dns-label', $output);
-        self::assertStringContainsString('Bind a domain to view SSL status', $output);
-    }
-
-    /* ------------------------- DNS delegation guidance --------------------- */
-
-    public function testRendersManagedIcannDnsGuidanceWithNameTypeValueTable(): void
-    {
-        // Managed ICANN: point the registrar at Pinner's nameserver NAME/TYPE/
-        // VALUE table, then publish the parent records; the authoritative side
-        // is handled for the operator.
-        $domain = new Domain(
-            '9',
-            'site.example.test',
-            'icann',
-            true,
-            'waiting_delegation',
-            'gw.example.com',
-            DelegationInfo::fromArray([
-                'mode' => null,
-                'nameservers' => ['ns1.pinner.xyz', 'ns2.pinner.xyz'],
-                'dnssec' => 'secure',
-                'dnssec_error' => null,
-                'parent_records' => [
-                    ['type' => 'NS', 'value' => 'ns1.pinner.xyz,ns2.pinner.xyz'],
-                    ['type' => 'DS', 'value' => '12345 8 2 ABCDEF'],
-                ],
-                'authoritative_records' => [],
-            ]),
-        );
-
-        $output = $this->render($this->view(), $this->dnsDomainView($domain));
-
-        // The managed ICANN guidance copy lands verbatim (apostrophes escaped).
-        self::assertStringContainsString('DNS delegation', $output);
-        self::assertStringContainsString('Update your domain&#039;s nameservers at your registrar.', $output);
-        self::assertStringContainsString('Point your registrar&#039;s nameservers to the records below.', $output);
-        self::assertStringContainsString('Pinner manages your DNS, so the authoritative side is handled for you.', $output);
-        self::assertStringContainsString('Parent records (configure at your registrar)', $output);
-
-        // The NAME/TYPE/VALUE nameserver table with each Pinner nameserver.
-        self::assertStringContainsString('>Name<', $output);
-        self::assertStringContainsString('>Type<', $output);
-        self::assertStringContainsString('>Value<', $output);
-        self::assertStringContainsString('>ns1.pinner.xyz<', $output);
-        self::assertStringContainsString('>ns2.pinner.xyz<', $output);
-        // The parent records DS value renders verbatim.
-        self::assertStringContainsString('>12345 8 2 ABCDEF<', $output);
-        // DNSSEC state renders verbatim, never computed.
-        self::assertStringContainsString('DNSSEC: secure', $output);
-        self::assertStringNotContainsString('DNSSEC error', $output);
-        // Managed DNS never asks the operator to add/validate the records.
-        self::assertStringNotContainsString('Add the DNS records shown above at your registrar, then validate.', $output);
-    }
-
-    public function testRendersManagedHnsDnsGuidanceOnChainWithNameserversAndDnssecError(): void
-    {
-        // Managed HNS (inline): the records live on-chain in the HNS wallet and
-        // the authoritative side is served via Pinner's synthetic nameservers.
-        $domain = new Domain(
-            '9',
-            'name/',
-            'hns',
-            true,
-            'waiting_delegation',
-            'gw.example.com',
-            DelegationInfo::fromArray([
-                'mode' => 'inline',
-                'nameservers' => ['ns1.pinner.xyz', 'ns2.pinner.xyz'],
-                'dnssec' => 'secure',
-                'dnssec_error' => 'dnssec-broken',
-                'parent_records' => [
-                    ['type' => 'NS', 'value' => 'ns1.pinner.xyz,ns2.pinner.xyz'],
-                    ['type' => 'DS', 'value' => '12345 8 2 ABCDEF'],
-                ],
-                'authoritative_records' => [],
-            ]),
-        );
-
-        $output = $this->render($this->view(), $this->dnsDomainView($domain));
-
-        self::assertStringContainsString('DNS delegation', $output);
-        self::assertStringContainsString(
-            'Publish the records below in the DNS/records area of your HNS wallet (on-chain).',
-            $output,
-        );
-        self::assertStringContainsString('The authoritative side is served via Pinner&#039;s synthetic nameservers.', $output);
-        self::assertStringContainsString('Parent records (publish in your HNS wallet)', $output);
-
-        // Comma-joined nameserver values split onto their own rows.
-        self::assertStringContainsString('>ns1.pinner.xyz<', $output);
-        self::assertStringContainsString('>ns2.pinner.xyz<', $output);
-
-        // The HNS nameservers list renders (the NAME/TYPE/VALUE table was not).
-        self::assertStringContainsString('Nameservers', $output);
-        // DNSSEC state AND error render verbatim, never computed.
-        self::assertStringContainsString('DNSSEC: secure', $output);
-        self::assertStringContainsString('DNSSEC error: dnssec-broken', $output);
-    }
-
-    public function testRendersSelfManagedDnsGuidanceWithChecksRows(): void
-    {
-        // Self-managed: the operator configures the records at the registrar,
-        // points their own DNS server at the authoritative records, then
-        // validates. The per-record values are the server-computed checks.
-        $domain = new Domain(
-            '9',
-            'site.example.test',
-            'icann',
-            false,
-            'waiting_delegation',
-            'gw.example.com',
-            DelegationInfo::fromArray([
-                'mode' => null,
-                'nameservers' => [],
-                'dnssec' => '',
-                'dnssec_error' => null,
-                'parent_records' => [],
-                'authoritative_records' => [
-                    ['type' => 'TXT', 'value' => 'pinner-verify=AbCdEf123456', 'ns' => null],
-                ],
-            ]),
-            [
-                CheckInfo::fromArray([
-                    'name' => 'pinner-verify',
-                    'ok' => false,
-                    'message' => '',
-                    'expected' => 'pinner-verify=AbCdEf123456',
-                    'found' => '',
-                ]),
-                CheckInfo::fromArray([
-                    'name' => 'dnslink',
-                    'ok' => false,
-                    'message' => '',
-                    'expected' => 'dnslink=/ipns/k-ipns-7',
-                    'found' => 'dnslink=/ipfs/QmWrong',
-                ]),
-            ],
-        );
-
-        $output = $this->render($this->view(), $this->dnsDomainView($domain));
-
-        self::assertStringContainsString('Configure the parent records at your registrar, then point your DNS server at the authoritative records below.', $output);
-        self::assertStringContainsString('Authoritative records (configure on your DNS server)', $output);
-        self::assertStringContainsString('>pinner-verify=AbCdEf123456<', $output);
-        self::assertStringContainsString('Add the DNS records shown above at your registrar, then validate.', $output);
-
-        // The server-computed per-record checks with the exact publish/found rows.
-        self::assertStringContainsString('Validation checks', $output);
-        self::assertStringContainsString('Publish this record:', $output);
-        self::assertStringContainsString('>pinner-verify=AbCdEf123456<', $output);
-        self::assertStringContainsString('Found instead:', $output);
-        self::assertStringContainsString('>dnslink=/ipns/k-ipns-7<', $output);
-        self::assertStringContainsString('>dnslink=/ipfs/QmWrong<', $output);
-    }
-
-    public function testRendersNoDelegationMessageWhenTheBundleIsAbsent(): void
-    {
-        // A bound domain without a delegation block yet (the portal has not
-        // produced records) says so plainly instead of implying records exist.
-        $domain = new Domain('9', 'name/', 'hns', true, 'waiting_delegation', 'gw.example.com');
-
-        $output = $this->render($this->view(), $this->dnsDomainView($domain));
-
-        self::assertStringContainsString('No delegation records are available for name/.', $output);
-        self::assertStringContainsString('Publish the delegation records below', $output);
-    }
-
-    public function testRendersTheValidateDnsActionMarker(): void
-    {
-        $domainView = $this->dnsDomainView(new Domain('9', 'site.example.test', 'icann', true, 'waiting_delegation'));
-
-        $output = $this->render($this->view(), $domainView);
-
-        self::assertStringContainsString('data-domain-action="validate"', $output);
-        self::assertStringContainsString('Validate DNS', $output);
-    }
-
-    public function testRendersGuidedWebsiteCardWhileAwaitingWithTwoPaths(): void
-    {
-        // A parked first publish awaiting a website renders the guided choice
-        // card server-side: exactly the two paths (create/link), the preserved
-        // CID to match in Pinner, and no fabricated progress anywhere.
         $output = $this->render($this->view([
             'runStatus' => RunStatus::Paused,
             'runActive' => true,
@@ -757,108 +1193,159 @@ final class PublishDashboardTemplateTest extends TestCase
             'awaitingCid' => 'QmParkedCid',
         ]));
 
-        // The root placeholder always exists; the card itself only while
-        // awaiting, with exactly one heading (dup-header rule: no second echo
-        // of "needs a website" beyond the card heading).
-        self::assertStringContainsString('data-cast-website-root', $output);
-        self::assertStringContainsString('class="card cast-website-card"', $output);
-        self::assertSame(1, substr_count($output, 'Publish to Pinner needs a website.'));
-
-        // The card copy, pinned verbatim from the design-doc S1 strings.
-        self::assertStringContainsString('A website tells Pinner where to serve your upload. Create one, or link one you already own.', $output);
-        self::assertStringContainsString('Preserved CID: QmParkedCid', $output);
-
-        // Path (a) create + the explicit auto-generate confirmation.
-        self::assertStringContainsString('Create a new website', $output);
-        self::assertStringContainsString('Web address (optional)', $output);
-        self::assertStringContainsString('placeholder="e.g. mysite.com"', $output);
-        self::assertStringContainsString('data-website-action="create"', $output);
-        self::assertStringContainsString('Platform domain will be auto-generated — continue?', $output);
-        self::assertStringContainsString('data-website-action="create-confirm"', $output);
-        // The empty-hostname confirm is hidden by default in the rendered
-        // template — the orchestrator only reveals it when the operator clicks
-        // Create website with no hostname. (The CSS re-pins the attribute so
-        // WP core's .button display rule cannot override it.)
-        self::assertStringContainsString('class="cast-website-create-confirm" hidden', $output);
-        self::assertStringContainsString('class="button cast-website-create-confirm-btn" data-website-action="create-confirm" hidden', $output);
-
-        // Path (b) link.
-        self::assertStringContainsString('Link a website you already have', $output);
-        self::assertStringContainsString('No websites available to link. Create one, or handle it in Pinner.', $output);
-
-        // Exactly two paths, no more: the manual "handle it in Pinner / Dismiss"
-        // path is gone by design, so its marker and copy must never render.
-        self::assertSame(2, substr_count($output, 'class="cast-website-path'));
-        self::assertStringNotContainsString('cast-website-path-manual', $output);
-        self::assertStringNotContainsString('cast-website-manual-dismiss', $output);
-        self::assertStringNotContainsString('data-website-action="dismiss"', $output);
-        self::assertStringNotContainsString('Dismiss', $output);
-
-        // The parked state carries no fabricated progress: the bar and the
-        // percentage value are omitted while awaiting, and the only progress
-        // line names the wait.
-        self::assertStringNotContainsString('cast-publish-progress-track', $output);
-        self::assertStringNotContainsString('cast-publish-progress-value', $output);
-        self::assertStringContainsString('Waiting for a website — the run is paused.', $output);
-
-        // The chip reads as deliberately sent (exactly once) and the context
-        // leads with the parked wait copy.
-        self::assertSame(1, substr_count($output, 'Sent — waiting for a website'));
-        self::assertStringContainsString('Your upload was sent. The run is waiting for a website — open Pinner and create one or attach one to this workspace, then come back.', $output);
-
-        // The resume-with-same-CID affordance lives in the action card, NOT
-        // inside the website card: it appears once, after the website card's
-        // closing tag.
-        self::assertSame(1, substr_count($output, 'Resume with this CID'));
-        $websiteCardOpen = strpos($output, 'class="card cast-website-card"');
-        self::assertNotFalse($websiteCardOpen, 'the website card opens');
-        $websiteCardClose = strpos($output, '</section>', $websiteCardOpen);
-        self::assertNotFalse($websiteCardClose, 'the website card closes');
-        self::assertStringNotContainsString('Resume with this CID', substr($output, 0, $websiteCardClose));
-
-        // A parked run has no prominent publish action: the primary button
-        // renders disabled.
-        self::assertStringContainsString('disabled', $output);
-    }
-
-    public function testOmitsWebsiteCardAndResumeWhenNotAwaiting(): void
-    {
-        $output = $this->render($this->view([
-            'runStatus' => RunStatus::Paused,
-            'runActive' => true,
-        ]));
-
-        // A plain paused run (not awaiting a website) renders no website card,
-        // no awaiting copy and no resume affordance.
+        // The parked post-upload website card is removed: the address is a
+        // pre-first-publish decision, so no post-upload choice surface.
         self::assertStringNotContainsString('cast-website-card', $output);
         self::assertStringNotContainsString('Publish to Pinner needs a website.', $output);
         self::assertStringNotContainsString('Resume with this CID', $output);
-        self::assertStringNotContainsString('Sent — waiting for a website', $output);
+        self::assertStringNotContainsString('data-website-action', $output);
+        // The plain paused chip is intact; the progress track stays hidden
+        // while the run is parked (no percentage is implied).
         self::assertStringContainsString('Paused', $output);
-        // The regular progress bar is back for a non-awaiting paused run.
-        self::assertStringContainsString('cast-publish-progress-track', $output);
+        self::assertStringNotContainsString('cast-publish-progress-track', $output);
     }
 
-    public function testEscapesThePreservedCidInTheWebsiteCard(): void
+    /* ----------------------------- when to publish ------------------------ */
+
+    public function testWhenToPublishRendersNativeRadiosWithPerOptionHelp(): void
     {
-        // The preserved CID is a server-supplied string; it must be escaped in
-        // the website card just like the main CID line.
+        $output = $this->render($this->view(['mode' => PublishMode::Manual]));
+
+        // Native radios (semantic, keyboard-traversable), friendly labels.
+        self::assertSame(2, substr_count($output, 'name="cast-publish-mode"'), 'exactly two trigger radios');
+        self::assertStringContainsString('Only when I choose', $output);
+        self::assertStringContainsString('When I update my site', $output);
+
+        // The active option is checked + non-actionable.
+        self::assertMatchesRegularExpression(
+            '/<input[^>]*type="radio"[^>]*name="cast-publish-mode"[^>]*value="manual"[^>]*checked[^>]*disabled[^>]*>/',
+            $output,
+            'the active (manual) radio must be checked and disabled',
+        );
+        self::assertMatchesRegularExpression(
+            '/<input[^>]*type="radio"[^>]*name="cast-publish-mode"[^>]*value="on_update"(?![^>]*checked)[^>]*>/',
+            $output,
+            'the inactive radio is not checked',
+        );
+
+        // The active mode's full end-user help renders as the guidance line.
+        self::assertStringContainsString(
+            'Publish only when you choose. Clicking Publish to Pinner queues a background publish — content edits wait until then and nothing publishes on its own.',
+            $output,
+        );
+        self::assertStringContainsString(
+            'Publish automatically. Eligible content changes queue a background publish for you — rapid edits are combined into one debounced publish instead of one per save.',
+            $output,
+        );
+        // The retired Scheduled mode is not offered anywhere in the selector.
+        self::assertStringNotContainsString('scheduled', $output);
+    }
+
+    public function testModeRadiosAreHiddenWhenModeCannotChange(): void
+    {
+        // Mid-run the trigger group (and its help) is not rendered at all, so
+        // no mode control is offered while the mode is locked.
         $output = $this->render($this->view([
-            'runStatus' => RunStatus::Paused,
+            'runStatus' => RunStatus::Running,
+            'runStage' => RunStage::Exporting,
             'runActive' => true,
-            'awaitingWebsite' => true,
-            'awaitingCid' => 'Qm<Parked>&Co',
         ]));
 
-        self::assertStringContainsString('Preserved CID: Qm&lt;Parked&gt;&amp;Co', $output);
-        self::assertStringNotContainsString('Qm<Parked>&Co', $output);
+        self::assertStringNotContainsString('name="cast-publish-mode"', $output);
+        self::assertStringNotContainsString('cast-publish-mode-help', $output);
     }
 
+    public function testWhenToPublishShowsAnInformativeFallbackWhenModeCannotChange(): void
+    {
+        // Not publish-ready (onboarding incomplete): the card carries a
+        // concise informative line — never an empty heading.
+        $output = $this->render($this->view(['onboardingComplete' => false]));
+
+        self::assertStringContainsString('When to publish', $output);
+        self::assertStringContainsString('cast-publish-mode-locked', $output);
+        self::assertStringContainsString(
+            'You can choose a publish trigger once your site is ready to publish.',
+            $output,
+        );
+        self::assertStringNotContainsString('name="cast-publish-mode"', $output);
+
+        // Mid-run: the copy names the lock, not a generic "not available".
+        $running = $this->render($this->view([
+            'runStatus' => RunStatus::Running,
+            'runStage' => RunStage::Exporting,
+            'runActive' => true,
+        ]));
+        self::assertStringContainsString('cast-publish-mode-locked', $running);
+        self::assertStringContainsString(
+            'The publish trigger is locked while a publish is in progress.',
+            $running,
+        );
+        self::assertStringNotContainsString('name="cast-publish-mode"', $running);
+    }
+
+    /* --------------------------- your pinner account ---------------------- */
+
+    public function testRendersResolvedAccountCardEscaped(): void
+    {
+        $output = $this->render($this->view([
+            'connection' => $this->resolvedConnection('Ada Lovelace', 'ada<@>example.test', 'main', 'main.example.test'),
+        ]));
+
+        self::assertStringContainsString('cast-connection-card', $output);
+        self::assertStringContainsString('Your Pinner account', $output);
+        self::assertStringContainsString('Connected', $output);
+        // Identifiers escape hostile characters; never echoed raw.
+        self::assertStringContainsString('ada&lt;@&gt;example.test', $output);
+        self::assertStringNotContainsString('ada<@>example.test', $output);
+        self::assertStringContainsString('main.example.test', $output);
+        self::assertStringContainsString('Ada Lovelace', $output);
+        self::assertStringNotContainsString('<script>', $output);
+    }
+
+    public function testRendersAccountErrorStateEscapedWithoutCredentials(): void
+    {
+        $output = $this->render($this->view([
+            'connection' => $this->errorConnection(),
+        ]));
+
+        self::assertStringContainsString('cast-connection-card', $output);
+        self::assertStringNotContainsString('Connected', $output);
+        self::assertStringContainsString('cast-connection-error', $output);
+        self::assertStringNotContainsString('account-key', $output);
+        self::assertStringNotContainsString('<script>', $output);
+    }
+
+    public function testRendersNoAccountCardWhenConnectionUnresolvedOrAbsent(): void
+    {
+        $output = $this->render($this->view());
+
+        self::assertStringNotContainsString('cast-connection-card', $output);
+    }
+
+    public function testRendersNoContentReadiness(): void
+    {
+        $output = $this->render($this->view(['hasEligibleContent' => false]));
+
+        self::assertStringContainsString('No publishable content yet', $output);
+    }
+
+    /* -------------------------------- helpers ------------------------------ */
+
     /**
-     * Render the production publish template through the same public boundary
-     * the subscriber uses (the default-path ViewRenderer) with the exact view
-     * keys PublishAdminSubscriber::render() provides.
+     * A confirmed-or-later custom destination for the connect-card fixtures.
      */
+    private function customDestinationView(string $domain, bool $dnsHostingEnabled = true): PublishDashboardView
+    {
+        return $this->view([
+            'destination' => new PublishDestinationView('created_or_attached', [
+                'source' => 'custom', 'domain' => $domain, 'namespace' => 'icann',
+                'dns_hosting_enabled' => $dnsHostingEnabled, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => null, 'label' => null,
+                'website_id' => null,
+            ]),
+        ]);
+    }
+
     /**
      * A ready domain panel with one bound (and selected) domain and its DNS
      * delegation result, so the DNS guidance block renders server-side.
@@ -876,6 +1363,11 @@ final class PublishDashboardTemplateTest extends TestCase
         );
     }
 
+    /**
+     * Render the production publish template through the same public boundary
+     * the subscriber uses (the default-path ViewRenderer) with the exact view
+     * keys PublishAdminSubscriber::render() provides.
+     */
     private function render(PublishDashboardView $view, ?DomainDashboardView $domainView = null): string
     {
         $renderer = new ViewRenderer();
@@ -942,6 +1434,7 @@ final class PublishDashboardTemplateTest extends TestCase
             'bootstrapIdentityComplete' => true,
             'envProblems' => [],
             'onboardingComplete' => true,
+            'onboardingSkipped' => false,
             'hasEligibleContent' => true,
             'mode' => PublishMode::Manual,
             'autoActive' => false,
@@ -962,6 +1455,15 @@ final class PublishDashboardTemplateTest extends TestCase
             'connection' => null,
             'awaitingWebsite' => false,
             'awaitingCid' => null,
+            // A confirmed destination keeps the choose-address gate out of
+            // these rendering fixtures (the gate only applies to unconfigured
+            // first-time sites).
+            'destination' => new PublishDestinationView('confirmed', [
+                'source' => 'platform', 'domain' => null, 'namespace' => null,
+                'dns_hosting_enabled' => true, 'platform_domain' => null,
+                'platform_namespace' => null, 'generate' => true, 'label' => null,
+                'website_id' => null,
+            ]),
         ];
         $merged = array_replace($defaults, $overrides);
 
@@ -974,6 +1476,7 @@ final class PublishDashboardTemplateTest extends TestCase
             bootstrapIdentityComplete: (bool) $merged['bootstrapIdentityComplete'],
             envProblems: $merged['envProblems'],
             onboardingComplete: (bool) $merged['onboardingComplete'],
+            onboardingSkipped: (bool) $merged['onboardingSkipped'],
             hasEligibleContent: (bool) $merged['hasEligibleContent'],
             mode: $merged['mode'],
             autoActive: (bool) $merged['autoActive'],
@@ -994,6 +1497,7 @@ final class PublishDashboardTemplateTest extends TestCase
             connection: $connection,
             awaitingWebsite: (bool) $merged['awaitingWebsite'],
             awaitingCid: $merged['awaitingCid'] === null ? null : (string) $merged['awaitingCid'],
+            destination: $merged['destination'],
         );
     }
 }

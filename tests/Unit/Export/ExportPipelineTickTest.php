@@ -316,6 +316,38 @@ final class ExportPipelineTickTest extends TestCase
         self::assertSame(RunStatus::Paused, $run->status);
     }
 
+    public function testParkedStageResultPausesTheRunWithoutAFailure(): void
+    {
+        // The custom-domain awaiting-DNS boundary reports a deliberate park:
+        // the orchestrator pauses the run — no retry bookkeeping, no failure
+        // — and the persisted awaiting-DNS boundary survives, so the
+        // operator-driven resume (DNS verification + publish-existing) reads
+        // it back and never re-uploads.
+        $publish = new FakePipelineStage(PipelineStageKey::Publish);
+        $publish->respond = static fn (): StageResult => StageResult::parked();
+        $tick = $this->pipeline([PipelineStageKey::Publish->value => $publish]);
+
+        $run = $this->startedRun('run-1');
+        // The run is already at the publish boundary (publish-only cursor) so
+        // the tick executes exactly the publish stage.
+        $run->recordResumeCursor(ExportRun::RESUME_PUBLISH_ONLY, at: 1002);
+        $run->recordPublishBoundary(
+            PublishBoundaryResult::awaitingDns('QmHash', 'website-1', 'k1-example.com', 'Waiting for the domain DNS'),
+            at: 1002,
+        );
+        $this->repository->save($run);
+
+        $result = $tick->perform($run, 1003);
+
+        self::assertFalse($result->finished);
+        self::assertSame(RunStatus::Paused, $run->status, 'a parked run pauses — never a retried failure');
+        self::assertSame('', (string) $run->lastError, 'a park records no error');
+        $saved = $this->repository->latest();
+        self::assertNotNull($saved);
+        self::assertSame(RunStatus::Paused, $saved->status);
+        self::assertSame(PublishBoundaryStatus::AwaitingDns, $saved->publish?->status);
+    }
+
     public function testTerminalRunNeverAdvances(): void
     {
         $probe = new FakePipelineStage(PipelineStageKey::Probe);

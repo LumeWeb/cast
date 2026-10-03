@@ -26,6 +26,9 @@ use LumeWeb\Cast\Jobs\TickConfig;
 use LumeWeb\Cast\Onboarding\Wizard;
 use LumeWeb\Cast\Onboarding\WizardState;
 use LumeWeb\Cast\Publish\Domain;
+use LumeWeb\Cast\Publish\PublishDestination;
+use LumeWeb\Cast\Publish\PublishDestinationState;
+use LumeWeb\Cast\Publish\PublishDestinationStore;
 use LumeWeb\Cast\Tests\Unit\Onboarding\FakeWizardStore;
 use PHPUnit\Framework\TestCase;
 
@@ -222,17 +225,19 @@ final class PublishAdminSubscriberTest extends TestCase
                 'mode' => 'http://example.test/wp-json/cast/v1/publish/mode',
                 'cancel' => 'http://example.test/wp-json/cast/v1/publish/cancel',
                 'artifact' => 'http://example.test/wp-json/cast/v1/publish/artifact',
-                'website_create' => 'http://example.test/wp-json/cast/v1/website',
+                'destination_get' => 'http://example.test/wp-json/cast/v1/publish/destination',
+                'destination_save' => 'http://example.test/wp-json/cast/v1/publish/destination',
+                'destination_confirm' => 'http://example.test/wp-json/cast/v1/publish/destination/confirm',
                 'website_available' => 'http://example.test/wp-json/cast/v1/website/available',
-                'website_link' => 'http://example.test/wp-json/cast/v1/website/link',
             ],
             $data['endpoints'],
         );
 
-        // The guided website card routes share the publish nonce but carry
-        // their own tight website_actions allowlist (a forged website action
-        // can never cross into a publish/domain route or vice versa).
-        self::assertSame(['website_create', 'website_available', 'website_link'], $data['website_actions']);
+        // The address wizard's destination routes share the publish nonce but
+        // carry their own tight destination_actions allowlist (a forged
+        // destination action can never cross into a publish/domain route or
+        // vice versa).
+        self::assertSame(['destination_get', 'destination_save', 'destination_confirm', 'website_available'], $data['destination_actions']);
 
         // The same wp_rest REST nonce every cast/v1 publish route verifies.
         self::assertSame('NONCE_' . PublishRestRouteRegistrar::REST_NONCE_ACTION, $data['nonce']);
@@ -369,8 +374,41 @@ final class PublishAdminSubscriberTest extends TestCase
      */
     public function testRenderPassesDomainDashboardViewWhenDomainDataAvailable(): void
     {
+        // The durable destination is a custom domain matching one of the bound
+        // domains: the Connect-your-domain card (the panel's scoped DNS block)
+        // is the observable effect of render() passing the DomainDashboardView.
+        $destinationStore = new class implements PublishDestinationStore {
+            private PublishDestinationState $state;
+
+            public function __construct()
+            {
+                $this->state = PublishDestinationState::confirmed(
+                    PublishDestination::custom('site.example.test', 'icann', true),
+                );
+            }
+
+            public function read(): PublishDestinationState
+            {
+                return $this->state;
+            }
+
+            public function saveDraft(PublishDestination $destination): void
+            {
+                $this->state = PublishDestinationState::draft($destination);
+            }
+
+            public function confirm(PublishDestination $destination): void
+            {
+                $this->state = PublishDestinationState::confirmed($destination);
+            }
+
+            public function markCreatedOrAttached(): void
+            {
+            }
+        };
+
         $subscriber = new PublishAdminSubscriber(
-            $this->service(),
+            $this->serviceWithOptions(destinationStore: $destinationStore),
             $this->context,
             $this->domainService(
                 domains: [
@@ -382,10 +420,11 @@ final class PublishAdminSubscriberTest extends TestCase
 
         $output = $this->captureRender($subscriber);
 
-        self::assertStringContainsString('cast-domain-panel', $output);
-        self::assertStringContainsString('Choose and manage your domain', $output);
+        self::assertStringContainsString('cast-domain-setup-card', $output);
+        self::assertStringContainsString('Connect your domain', $output);
         self::assertStringContainsString('site.example.test', $output);
-        self::assertStringContainsString('DNS delegation', $output);
+        // The removed generic diagnostics panel is gone from the page.
+        self::assertStringNotContainsString('cast-domain-panel', $output);
     }
 
     /**
@@ -397,7 +436,82 @@ final class PublishAdminSubscriberTest extends TestCase
     {
         $output = $this->captureRender($this->subscriber);
 
-        self::assertStringNotContainsString('cast-domain-panel', $output);
+        self::assertStringNotContainsString('cast-domain-setup-card', $output);
+    }
+
+    /**
+     * The connect-your-domain card is scoped to the destination's OWN domain:
+     * when the selected custom domain is not the first listed bound domain,
+     * render() must still hand the panel the destination-scoped bundle (the
+     * explicit name match in the template only then renders the card's DNS
+     * block) — never the implicit first-list pick.
+     */
+    public function testRenderScopesDomainCardToTheDestinationDomainNotFirstListed(): void
+    {
+        $destinationStore = new class implements PublishDestinationStore {
+            private PublishDestinationState $state;
+
+            public function __construct()
+            {
+                $this->state = PublishDestinationState::confirmed(
+                    PublishDestination::custom('shop.example.test', 'icann', true),
+                );
+            }
+
+            public function read(): PublishDestinationState
+            {
+                return $this->state;
+            }
+
+            public function saveDraft(PublishDestination $destination): void
+            {
+                $this->state = PublishDestinationState::draft($destination);
+            }
+
+            public function confirm(PublishDestination $destination): void
+            {
+                $this->state = PublishDestinationState::confirmed($destination);
+            }
+
+            public function markCreatedOrAttached(): void
+            {
+            }
+        };
+
+        $client = new FakeDomainClient();
+        $client->domains = [
+            new Domain('99', 'other.example.test', 'icann', true, 'waiting_delegation', 'gw.example.com'),
+            new Domain('7', 'shop.example.test', 'icann', false, 'active', 'gw.example.com'),
+        ];
+        $identity = new InMemoryIdentityGateway();
+        $identity->setCurrentIdentity(new PublishIdentity(
+            websiteId: 'web-42',
+            websiteName: 'My Blog',
+            ipnsKeyId: 'k-ipns-7',
+            ipnsKeyName: 'cast-live',
+            ready: true,
+        ));
+        $domains = new DomainSetupService(
+            env: $this->completeEnv(),
+            identity: $identity,
+            domains: $client,
+        );
+
+        $subscriber = new PublishAdminSubscriber(
+            $this->serviceWithOptions(destinationStore: $destinationStore),
+            $this->context,
+            $domains,
+        );
+
+        $output = $this->captureRender($subscriber);
+
+        self::assertStringContainsString('cast-domain-setup-card', $output);
+        // The card's DNS block is the destination's own bundle: the template
+        // only renders it when the panel's domain bundle IS the destination
+        // domain, so this line proves the destination — not the first listed
+        // domain — drove the DNS read.
+        self::assertStringContainsString('No delegation records are available for shop.example.test.', $output);
+        self::assertStringNotContainsString('other.example.test', $output);
     }
 
     public function testAdminBarSkipsWithoutCapability(): void
@@ -870,6 +984,7 @@ final class PublishAdminSubscriberTest extends TestCase
         bool $hasContent = true,
         ?PublishMode $mode = null,
         ?NoticeDismissalStore $noticeDismissals = null,
+        ?PublishDestinationStore $destinationStore = null,
     ): PublishSetupService {
         $clock = new FixedClock(1_700_000_000);
         $repository = new InMemoryRunRepository();
@@ -894,6 +1009,7 @@ final class PublishAdminSubscriberTest extends TestCase
             modeStore: $modeStore,
             clock: $clock,
             noticeDismissals: $noticeDismissals,
+            destinationStore: $destinationStore,
         );
     }
 

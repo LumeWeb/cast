@@ -38,10 +38,12 @@ final class IpfsWebsitesClient implements WebsiteList
 
     /**
      * POST /api/websites — create a website. Only the fields the caller
-     * explicitly set are serialized: label/domain/namespace are omitted when
-     * null (so an auto-generated platform domain never carries a made-up
-     * label), generate is only present when true (never on the custom-domain
-     * path), and dns_hosting_enabled is only present when true.
+     * explicitly set are serialized: label/domain/namespace and
+     * platform_domain/platform_namespace are omitted when null (so a
+     * platform-generated subdomain never carries a made-up label or a custom
+     * domain), generate is only present when true (never on the custom-domain
+     * path), and dns_hosting_enabled is sent exactly when stated — including
+     * an explicit false for a self-managed custom domain.
      *
      * @throws \LumeWeb\Cast\Http\HttpException transport/status/decoding failures (typed family preserved)
      */
@@ -60,11 +62,17 @@ final class IpfsWebsitesClient implements WebsiteList
         if ($request->namespace !== null) {
             $body['namespace'] = $request->namespace;
         }
+        if ($request->platformDomain !== null) {
+            $body['platform_domain'] = $request->platformDomain;
+        }
+        if ($request->platformNamespace !== null) {
+            $body['platform_namespace'] = $request->platformNamespace;
+        }
         if ($request->generate) {
             $body['generate'] = true;
         }
-        if ($request->dnsHostingEnabled) {
-            $body['dns_hosting_enabled'] = true;
+        if ($request->dnsHostingEnabled !== null) {
+            $body['dns_hosting_enabled'] = $request->dnsHostingEnabled;
         }
 
         $response = $this->transport->send('POST', $this->baseUrl . '/api/websites', $this->headers(), $this->encode($body));

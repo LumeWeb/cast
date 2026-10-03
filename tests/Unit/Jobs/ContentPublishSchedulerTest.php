@@ -20,6 +20,9 @@ use LumeWeb\Cast\Jobs\InMemoryScheduler;
 use LumeWeb\Cast\Jobs\PublishMode;
 use LumeWeb\Cast\Jobs\PublishModeStore;
 use LumeWeb\Cast\Jobs\PublishScheduleState;
+use LumeWeb\Cast\Publish\PublishDestination;
+use LumeWeb\Cast\Publish\WordPressPublishDestinationStore;
+use LumeWeb\Cast\Tests\Unit\Persistence\FakeOptionGateway;
 use PHPUnit\Framework\TestCase;
 
 final class ContentPublishSchedulerTest extends TestCase
@@ -45,6 +48,7 @@ final class ContentPublishSchedulerTest extends TestCase
         int $followUpSeconds = 5,
         ?PublishModeStore $modeStore = null,
         ?WorkItemRepository $workItems = null,
+        ?WordPressPublishDestinationStore $destinationStore = null,
     ): ContentPublishScheduler {
         // The pre-existing fixtures exercise the debounce/squash/supersede
         // behaviour, which is the OnUpdate-path; Manual drift is covered by the
@@ -58,7 +62,52 @@ final class ContentPublishSchedulerTest extends TestCase
             workItems: $workItems ?? new InMemoryWorkItemRepository(),
             quietSeconds: $quietSeconds,
             followUpDelaySeconds: $followUpSeconds,
+            destinationStore: $destinationStore,
         );
+    }
+
+    /**
+     * A real destination store holding only an unconfirmed draft.
+     */
+    private function draftDestinationStore(): WordPressPublishDestinationStore
+    {
+        $destination = PublishDestination::platformLabelled('my-site');
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $store->saveDraft($destination);
+
+        return $store;
+    }
+
+    public function testFreshRunSnapshotsAConfirmedDestinationIntoTheSettings(): void
+    {
+        $destination = PublishDestination::custom('example.com', 'icann', true);
+        $store = new WordPressPublishDestinationStore(new FakeOptionGateway());
+        $store->saveDraft($destination);
+        $store->confirm($destination);
+
+        $this->makeService(destinationStore: $store)->startNow(at: 1000);
+
+        $run = $this->repository->latest();
+        self::assertNotNull($run);
+        // Value equality: the store rehydrates the destination from the
+        // option table, so the snapshot is an equal (not identical) value.
+        self::assertSame($destination->toArray(), $run->settings->destination?->toArray());
+    }
+
+    public function testFreshRunLeavesADraftDestinationOutOfTheSettings(): void
+    {
+        // A draft is not a confirmed choice: it must never be snapshotted
+        // into a run's settings (the first-publish gate refuses it).
+        $this->makeService(destinationStore: $this->draftDestinationStore())->startNow(at: 1000);
+
+        self::assertNull($this->repository->latest()?->settings->destination);
+    }
+
+    public function testFreshRunHasNoDestinationWithoutAStore(): void
+    {
+        $this->makeService()->startNow(at: 1000);
+
+        self::assertNull($this->repository->latest()?->settings->destination);
     }
 
     private function makeRun(string $id, int $at): ExportRun
