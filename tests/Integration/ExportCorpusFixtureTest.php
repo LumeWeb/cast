@@ -35,6 +35,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class ExportCorpusFixtureTest extends TestCase
 {
+    private const RUN = 'run-1';
     private const PAGE_URL = 'http://example.org/corpus-page/';
     private const THEME_URL_ROOT = 'http://example.org/wp-content/themes/corpus-fixture/';
     private const THEME_PATH_ROOT = '/wp-content/themes/corpus-fixture/';
@@ -87,13 +88,13 @@ final class ExportCorpusFixtureTest extends TestCase
         // The five theme assets (plus the wlwmanifest) are collected at the
         // urgent rewrite-derived priority; identity ignores cache-busting queries.
         foreach (['style.css', 'query.css', 'img-800.png', 'bg.png', 'og.png'] as $asset) {
-            self::assertSame(1, $repository->priorityOf(hash('md5', self::THEME_URL_ROOT . $asset)), sprintf('The rewrite must collect %s.', $asset));
+            self::assertSame(1, $repository->priorityOf(self::RUN, hash('md5', self::THEME_URL_ROOT . $asset)), sprintf('The rewrite must collect %s.', $asset));
         }
-        self::assertSame(1, $repository->priorityOf(hash('md5', 'http://example.org/wp-includes/wlwmanifest.xml')), 'The rewrite must collect the wlwmanifest.');
+        self::assertSame(1, $repository->priorityOf(self::RUN, hash('md5', 'http://example.org/wp-includes/wlwmanifest.xml')), 'The rewrite must collect the wlwmanifest.');
 
-        self::assertSame(4, $repository->countByStatus(WorkItemStatus::Rewritten), 'Page, both stylesheets and the wlwmanifest must be rewritten.');
-        self::assertSame(3, $repository->countByStatus(WorkItemStatus::Done), 'The three images must pass through Done.');
-        self::assertSame(0, $repository->pendingCount());
+        self::assertSame(4, $repository->countByStatus(self::RUN, WorkItemStatus::Rewritten), 'Page, both stylesheets and the wlwmanifest must be rewritten.');
+        self::assertSame(3, $repository->countByStatus(self::RUN, WorkItemStatus::Done), 'The three images must pass through Done.');
+        self::assertSame(0, $repository->pendingCount(self::RUN));
         self::assertNotNull($state->rewrite, 'Rewrite must record its summary at the fixed point.');
         self::assertSame(4, $state->rewrite->rewritten);
         self::assertSame(3, $state->rewrite->passedThrough);
@@ -158,17 +159,25 @@ final class ExportCorpusFixtureTest extends TestCase
         );
     }
 
+    private function state(): PipelineState
+    {
+        $state = new PipelineState();
+        $state->runId = self::RUN;
+
+        return $state;
+    }
+
     /**
      * @return array{0: InMemoryWorkItemRepository, 1: PipelineState}
      */
     private function queuePageItem(): array
     {
         $origin = Origin::fromUrl((new UrlCanonicalizer())->canonicalize('http://example.org/'));
-        $state = new PipelineState();
+        $state = $this->state();
         $state->probe = new ProbeResult($origin, self::PAGE_URL, 0, 0);
         $state->setup = new SetupResult($this->workDir);
         $repository = new InMemoryWorkItemRepository();
-        $repository->insertCanonical((new WorkItemFactory())->fromString(self::PAGE_URL), 10);
+        $repository->insertCanonical(self::RUN, (new WorkItemFactory())->fromString(self::PAGE_URL), 10);
 
         return [$repository, $state];
     }

@@ -18,6 +18,7 @@ use PHPUnit\Framework\TestCase;
 
 final class ArtifactValidatorTest extends TestCase
 {
+    private const RUN = 'run-1';
     private Origin $origin;
 
     protected function setUp(): void
@@ -174,11 +175,11 @@ final class ArtifactValidatorTest extends TestCase
         $factory = new WorkItemFactory();
         foreach ($statuses as $i => $rowStatus) {
             $item = $factory->fromString('https://example.com/t' . $i);
-            $repo->insertCanonical($item);
-            $repo->transition($item->urlHash(), $rowStatus);
+            $repo->insertCanonical(self::RUN, $item);
+            $repo->transition(self::RUN, $item->urlHash(), $rowStatus);
         }
 
-        return new RepositoryWorkItemStateProvider($repo);
+        return new RepositoryWorkItemStateProvider($repo, fn (): string => self::RUN);
     }
 
     private function pad(string $html): string

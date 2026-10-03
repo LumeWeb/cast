@@ -27,6 +27,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class DiscoverStageTest extends TestCase
 {
+    private const RUN = 'run-1';
     private const ORIGIN = 'https://blog.example.test/';
 
     private InMemoryWorkItemRepository $repo;
@@ -55,13 +56,13 @@ final class DiscoverStageTest extends TestCase
 
     public function testRequiresSuccessfulProbeBeforeSeeding(): void
     {
-        $stage = $this->stage(new FakeDiscoverEnvironment(), new FakeCaptureHttp(), new PipelineState());
+        $stage = $this->stage(new FakeDiscoverEnvironment(), new FakeCaptureHttp(), $this->state());
 
         $result = $stage->execute('');
 
         self::assertNotNull($result->failure);
         self::assertStringContainsString('probe', strtolower($result->failure));
-        self::assertSame(0, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(0, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
     }
 
     public function testSeedsStaticSeedersThroughGateAndRepository(): void
@@ -76,7 +77,7 @@ final class DiscoverStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(3, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(3, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
         self::assertSame(3, $this->state->discover?->enqueued);
     }
 
@@ -92,12 +93,12 @@ final class DiscoverStageTest extends TestCase
 
         self::assertFalse($first->done);
         self::assertSame('seed:1', $first->cursor);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
 
         $result = $this->drainAll($env, new FakeCaptureHttp());
 
         self::assertTrue($result->done);
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
     }
 
     public function testExclusionPolicyFiltersSeeds(): void
@@ -112,7 +113,7 @@ final class DiscoverStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
     }
 
     public function testWildcardPseudoUrlsAreDroppedWithoutCount(): void
@@ -132,11 +133,11 @@ final class DiscoverStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Queued), 'only the real root page is queued');
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued), 'only the real root page is queued');
         self::assertSame(1, $this->state->discover?->enqueued);
         foreach (['https://blog.example.test/wp-admin/*', 'https://blog.example.test/wp-*.php', 'https://blog.example.test/?s=*'] as $glob) {
             $hash = (new WorkItemFactory())->fromString($glob)->urlHash();
-            self::assertNull($this->repo->priorityOf($hash), "glob {$glob} never reaches the queue");
+            self::assertNull($this->repo->priorityOf(self::RUN, $hash), "glob {$glob} never reaches the queue");
         }
     }
 
@@ -152,7 +153,7 @@ final class DiscoverStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
     }
 
     public function testHardCapStopsSeedingEarlyWithWarning(): void
@@ -167,7 +168,7 @@ final class DiscoverStageTest extends TestCase
 
         $first = $stage->execute('');
         self::assertSame('seed:1', $first->cursor);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
 
         $second = $this->stage($env, new FakeCaptureHttp(), maxItems: 2)->execute('seed:1');
 
@@ -175,7 +176,7 @@ final class DiscoverStageTest extends TestCase
         self::assertNull($second->failure);
         self::assertNotEmpty($second->warnings);
         self::assertStringContainsString('cap', strtolower(implode(' ', $second->warnings)));
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
         self::assertSame(2, $this->state->discover?->enqueued);
     }
 
@@ -189,7 +190,7 @@ final class DiscoverStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
     }
 
     public function testPostsKeysetContinuesAcrossPages(): void
@@ -210,13 +211,13 @@ final class DiscoverStageTest extends TestCase
 
         self::assertFalse($first->done);
         self::assertStringStartsWith('posts:post:', $first->cursor);
-        self::assertSame(50, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(50, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
 
         $second = $this->stage($env, new FakeCaptureHttp())->execute($first->cursor);
 
         self::assertTrue($second->done);
         self::assertNull($second->failure);
-        self::assertSame(52, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(52, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
     }
 
     public function testResumeContinuesFromSeedCursorWithAFreshStage(): void
@@ -229,13 +230,13 @@ final class DiscoverStageTest extends TestCase
         $first = $this->stage($env, new FakeCaptureHttp())->execute('');
 
         self::assertSame('seed:1', $first->cursor);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
 
         $resumed = $this->stage($env, new FakeCaptureHttp())->execute('seed:1');
 
         self::assertFalse($resumed->done);
         self::assertSame('seed:2', $resumed->cursor);
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
     }
 
     public function testDoneOnlyAfterAllProducerCursorsExhaust(): void
@@ -255,7 +256,7 @@ final class DiscoverStageTest extends TestCase
         self::assertTrue($result->done);
         self::assertNull($result->failure);
         self::assertSame('', $result->cursor);
-        self::assertSame(4, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(4, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
         self::assertSame(4, $this->state->discover?->enqueued);
     }
 
@@ -268,7 +269,7 @@ final class DiscoverStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(0, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(0, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
         self::assertSame(0, $this->state->discover?->enqueued);
         self::assertCount(0, $http->calls);
     }
@@ -346,7 +347,7 @@ final class DiscoverStageTest extends TestCase
         self::assertTrue($result->done);
         self::assertNull($result->failure);
         self::assertCount(2, $http->calls);
-        self::assertSame(3, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(3, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
         self::assertSame(3, $this->state->discover?->enqueued);
         self::assertTrue($this->isQueued('https://blog.example.test/sitemap_index.xml'));
         self::assertTrue($this->isQueued('https://blog.example.test/sitemap-1.xml'));
@@ -367,7 +368,7 @@ final class DiscoverStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
         self::assertFalse($this->isQueued('https://evil.example.net/steal'));
     }
 
@@ -438,14 +439,14 @@ final class DiscoverStageTest extends TestCase
         self::assertCount(1, $http->calls);
         self::assertFalse($result->done);
         self::assertStringStartsWith('sitemap:', $cursor);
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
 
         $resumed = $this->stage($env, $http)->execute($cursor);
 
         self::assertTrue($resumed->done);
         self::assertNull($resumed->failure);
         self::assertCount(2, $http->calls);
-        self::assertSame(4, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(4, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
     }
 
     public function testEnforcesSitemapDepthCap(): void
@@ -461,7 +462,7 @@ final class DiscoverStageTest extends TestCase
         self::assertTrue($result->done);
         self::assertNull($result->failure);
         self::assertCount(2, $http->calls);
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
         self::assertTrue($this->isQueued('https://blog.example.test/sitemap_index.xml'));
         self::assertTrue($this->isQueued('https://blog.example.test/sitemap-child.xml'));
         self::assertFalse($this->isQueued('https://blog.example.test/sitemap-grandchild.xml'));
@@ -482,7 +483,7 @@ final class DiscoverStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(3, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(3, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
         self::assertFalse($this->isQueued('https://blog.example.test/3/'));
     }
 
@@ -505,9 +506,17 @@ final class DiscoverStageTest extends TestCase
         self::assertStringContainsString('cap', strtolower(implode(' ', $result->warnings)));
     }
 
-    private function probeStateForOrigin(string $originUrl): PipelineState
+    private function state(): PipelineState
     {
         $state = new PipelineState();
+        $state->runId = self::RUN;
+
+        return $state;
+    }
+
+    private function probeStateForOrigin(string $originUrl): PipelineState
+    {
+        $state = $this->state();
         $origin = Origin::fromUrl((new UrlCanonicalizer())->canonicalize($originUrl));
         $state->probe = new ProbeResult($origin, $originUrl, 2048, 5);
 
@@ -546,12 +555,12 @@ final class DiscoverStageTest extends TestCase
     {
         $canonical = (new UrlCanonicalizer())->canonicalize($url);
 
-        return $this->repo->priorityOf(md5($canonical->base())) !== null;
+        return $this->repo->priorityOf(self::RUN, md5($canonical->base())) !== null;
     }
 
     private function probeState(): PipelineState
     {
-        $state = new PipelineState();
+        $state = $this->state();
         $origin = Origin::fromUrl((new UrlCanonicalizer())->canonicalize(self::ORIGIN));
         $state->probe = new ProbeResult($origin, self::ORIGIN, 2048, 5);
 

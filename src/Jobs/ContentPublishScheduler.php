@@ -302,16 +302,12 @@ final class ContentPublishScheduler
         }
         $this->repository->create($pending);
 
-        // A NEW run id was just persisted, so the work-item queue is cleared
-        // here and only here: the next discovery refills it, and the prior
-        // (terminal, cancelled or failed) run's done/rewritten rows must not
-        // survive — insertCanonical is first-seen-wins and never re-queues a
-        // finished row, so a stale row would starve the fresh per-run work
-        // directory and pack would fail with "Work tree has no root
-        // index.html". Mid-run absorption (startNow on a queued NotStarted
-        // run, publishExisting replay, ticks and status reads) never reaches
-        // this branch and never clears.
-        $this->workItems->clear();
+        // The work-item queue is cleared here and only here, when a new run
+        // id is persisted: without the clear, first-seen-wins would starve
+        // the fresh per-run work directory with the stale rows the new id
+        // already carries, so the new run must start from a clean queue. The
+        // clear is scoped to the new run's slice.
+        $this->workItems->clear($pending->runId);
     }
 
     /**

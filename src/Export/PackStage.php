@@ -53,9 +53,10 @@ final class PackStage implements PipelineStage
         $tree = new DirectoryArtifactTree($workDir);
         $report = (new ArtifactValidator(
             $tree,
-            new RepositoryWorkItemStateProvider($this->repository),
+            new RepositoryWorkItemStateProvider($this->repository, fn (): string => $this->runId),
             $origin,
             $this->environment->validationMode(),
+            runId: $this->runId,
         ))->validate();
 
         $zipPath = $this->environment->artifactPath($this->runId);

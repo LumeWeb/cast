@@ -25,6 +25,8 @@ final class ArtifactValidator
         private readonly Origin $origin,
         private readonly ArtifactValidationMode $mode = ArtifactValidationMode::Warning,
         private readonly array $intentionalPaths = [],
+        // '' leaves run resolution to the state provider.
+        private readonly string $runId = '',
     ) {
     }
 
@@ -34,7 +36,7 @@ final class ArtifactValidator
         $paths = $this->tree->paths();
 
         // 1. Fixed point: the crawler must be terminal before anything packs.
-        if ($this->state->hasPending()) {
+        if ($this->state->hasPending($this->runId)) {
             $findings[] = new ValidationFinding(
                 'pending_items',
                 ValidationSeverity::Hard,
@@ -149,11 +151,11 @@ final class ArtifactValidator
     {
         return [
             'files' => count($paths),
-            'queued' => $this->state->countByStatus(WorkItemStatus::Queued),
-            'processing' => $this->state->countByStatus(WorkItemStatus::Processing),
-            'done' => $this->state->countByStatus(WorkItemStatus::Done),
-            'failed' => $this->state->countByStatus(WorkItemStatus::Failed),
-            'skipped' => $this->state->countByStatus(WorkItemStatus::Skipped),
+            'queued' => $this->state->countByStatus($this->runId, WorkItemStatus::Queued),
+            'processing' => $this->state->countByStatus($this->runId, WorkItemStatus::Processing),
+            'done' => $this->state->countByStatus($this->runId, WorkItemStatus::Done),
+            'failed' => $this->state->countByStatus($this->runId, WorkItemStatus::Failed),
+            'skipped' => $this->state->countByStatus($this->runId, WorkItemStatus::Skipped),
         ];
     }
 }

@@ -8,29 +8,47 @@ use LumeWeb\Cast\Persistence\WpDbGateway;
 
 /**
  * In-memory WpDbGateway faithful to the MariaDB storage semantics the durable
- * queue depends on: a unique url_hash index, integer retry_at, and the exact
- * statement vocabulary {@see \LumeWeb\Cast\Persistence\SqlWorkItemRepository}
+ * queue depends on: a unique (run_id, url_hash) index, integer retry_at
+ * gating, lease-based atomic claims (worker token + lease expiry), and the
+ * exact statement vocabulary {@see \LumeWeb\Cast\Persistence\SqlWorkItemRepository}
  * emits. The repository's decision logic (first-successful-doesn't-win,
- * lower-priority-replaces, atomic conditional claims) lives in the repository,
- * not here — this fake only stores rows and interprets the bounded SQL surface.
+ * lower-priority-replaces, exclusive claims, lease expiry) lives in the
+ * repository, not here: this fake only stores rows and interprets the bounded
+ * SQL surface.
  *
- * Rows are ordered by insertion order (which stands in for AUTO_INCREMENT id),
- * so ORDER BY priority ASC, id ASC resolves deterministically like MariaDB.
+ * Rows are scoped by run id (nothing ever crosses run boundaries) and ordered
+ * by insertion order (which stands in for AUTO_INCREMENT id), so ORDER BY
+ * priority ASC, id ASC resolves deterministically like MariaDB.
  */
 final class FakeWpDbGateway implements WpDbGateway
 {
     /**
-     * @var list<array<string, mixed>>
+     * @var array<int, array<string, mixed>>
      */
     private array $rows = [];
 
+    /**
+     * Every statement dispatched, before wpdb-style substitution: [sql, params].
+     *
+     * @var list<array{0: string, 1: list<mixed>}> $prepared
+     */
+    public array $prepared = [];
+
     public function query(string $sql, array $params = []): int
     {
+        $this->prepared[] = [$sql, array_values($params)];
+
         if (str_contains($sql, 'DELETE FROM')) {
-            // The repository's clear() empties the shared queue per new run;
-            // wpdb returns the number of deleted rows.
-            $deleted = count($this->rows);
-            $this->rows = [];
+            // The repository's clear(runId) empties one run's slice of the
+            // shared queue; wpdb returns the number of deleted rows.
+            $deleted = 0;
+            foreach ($this->rows as $index => $row) {
+                if ($row['run_id'] === $params[0]) {
+                    unset($this->rows[$index]);
+                    ++$deleted;
+                }
+            }
+            $this->rows = array_values($this->rows);
 
             return $deleted;
         }
@@ -51,31 +69,49 @@ final class FakeWpDbGateway implements WpDbGateway
             return $this->setPriority($params);
         }
 
-        // Plain status transition: UPDATE ... SET status = %s WHERE url_hash = %s
+        // Plain status transition: UPDATE ... SET status = %s, worker_token = '',
+        // lease_expires_at = 0 WHERE run_id = %s AND url_hash = %s
         return $this->transition($params);
     }
 
     public function getVar(string $sql, array $params = []): mixed
     {
+        $this->prepared[] = [$sql, array_values($params)];
+
+        if (str_contains($sql, 'ORDER BY priority') && str_contains($sql, 'SELECT url_hash FROM')) {
+            // Claim peek: [runId, 'queued', now, 'processing', now].
+            return $this->nextClaimableHash((string) $params[0], (int) $params[2]);
+        }
+
         if (str_contains($sql, 'SELECT url_hash FROM')) {
-            return $this->nextQueuedHash((int) $params[1]);
+            // Existence check: [runId, urlHash].
+            $row = $this->find((string) $params[0], (string) $params[1]);
+
+            return $row === null ? null : $row['url_hash'];
         }
 
         if (str_contains($sql, 'SELECT priority FROM')) {
-            $row = $this->find((string) $params[0]);
+            $row = $this->find((string) $params[0], (string) $params[1]);
 
             return $row === null ? null : $row['priority'];
         }
 
         if (str_contains($sql, 'SELECT fetch_attempts FROM')) {
-            $row = $this->find((string) $params[0]);
+            $row = $this->find((string) $params[0], (string) $params[1]);
 
             return $row === null ? 0 : $row['fetch_attempts'];
         }
 
+        if (str_contains($sql, 'SELECT status FROM')) {
+            $row = $this->find((string) $params[0], (string) $params[1]);
+
+            return $row === null ? null : $row['status'];
+        }
+
         if (str_contains($sql, 'status IN')) {
+            // [runId, 'queued', 'processing'].
             $pending = 0;
-            foreach ($this->rows as $row) {
+            foreach ($this->rowsInRun((string) $params[0]) as $row) {
                 if (in_array($row['status'], ['queued', 'processing'], true)) {
                     ++$pending;
                 }
@@ -84,11 +120,10 @@ final class FakeWpDbGateway implements WpDbGateway
             return $pending;
         }
 
-        // SELECT COUNT(*) FROM ... WHERE status = %s
-        $status = (string) $params[0];
+        // SELECT COUNT(*) FROM ... WHERE run_id = %s AND status = %s
         $count = 0;
-        foreach ($this->rows as $row) {
-            if ($row['status'] === $status) {
+        foreach ($this->rowsInRun((string) $params[0]) as $row) {
+            if ($row['status'] === $params[1]) {
                 ++$count;
             }
         }
@@ -98,19 +133,12 @@ final class FakeWpDbGateway implements WpDbGateway
 
     public function getRow(string $sql, array $params = []): ?array
     {
-        if (str_contains($sql, 'SELECT status, priority FROM')) {
-            $row = $this->find((string) $params[0]);
-            if ($row === null) {
-                return null;
-            }
+        $this->prepared[] = [$sql, array_values($params)];
 
-            return ['status' => $row['status'], 'priority' => $row['priority']];
-        }
-
-        if (str_contains($sql, 'WHERE status = ')) {
-            // First rewritable (done) row, lowest priority first.
+        if (str_contains($sql, 'kind IN')) {
+            // First rewritable (done) row of the run, lowest priority first.
             $candidates = [];
-            foreach ($this->rows as $row) {
+            foreach ($this->rowsInRun((string) $params[0]) as $row) {
                 if ($row['status'] !== 'done') {
                     continue;
                 }
@@ -124,8 +152,8 @@ final class FakeWpDbGateway implements WpDbGateway
             return $candidates === [] ? null : $candidates[0];
         }
 
-        // Full row by url_hash: SELECT ... FROM ... WHERE url_hash = %s
-        return $this->find((string) $params[0]);
+        // Full row by (run_id, url_hash): SELECT ... WHERE run_id = %s AND url_hash = %s
+        return $this->find((string) $params[0], (string) $params[1]);
     }
 
     public function rowCount(): int
@@ -134,18 +162,30 @@ final class FakeWpDbGateway implements WpDbGateway
     }
 
     /**
+     * The stored row for a (run, hash) pair, for lease-ownership assertions.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function rowFor(string $runId, string $hash): ?array
+    {
+        return $this->find($runId, $hash);
+    }
+
+    /**
      * @param list<string|int> $params
      */
     private function insert(array $params): int
     {
-        [$hash, $url, $identity, $path, $kind, $priority, $status, $fetchAttempts, $retryAt] = $params;
+        [$runId, $hash, $url, $identity, $path, $kind, $priority, $status, $fetchAttempts, $retryAt, $workerToken, $leaseExpiresAt] = $params;
 
-        if ($this->find((string) $hash) !== null) {
-            // Unique url_hash index rejects a duplicate row.
+        if ($this->find((string) $runId, (string) $hash) !== null) {
+            // Unique (run_id, url_hash) index rejects a duplicate row in the
+            // same run; the same hash in ANOTHER run is a distinct row.
             return 0;
         }
 
         $this->rows[] = [
+            'run_id' => $runId,
             'url_hash' => $hash,
             'url' => $url,
             'identity' => $identity,
@@ -155,27 +195,34 @@ final class FakeWpDbGateway implements WpDbGateway
             'status' => $status,
             'fetch_attempts' => $fetchAttempts,
             'retry_at' => $retryAt,
+            'worker_token' => $workerToken,
+            'lease_expires_at' => $leaseExpiresAt,
         ];
 
         return 1;
     }
 
     /**
-     * Atomic conditional claim: only a queued row may become processing and its
+     * Atomic conditional lease claim: only a queued row whose retry is due,
+     * or an in-flight row whose lease has expired, becomes (re-)claimed; the
+     * claiming worker token and the new lease expiry are recorded and the
      * attempt count advances exactly once.
      *
      * @param list<string|int> $params
      */
     private function claim(array $params): int
     {
-        [$processing, $hash, $queued] = $params;
-        $row = $this->find((string) $hash);
+        // [processing, worker, leaseExpiresAt, runId, hash, queued, now, processing, now]
+        [$processing, $worker, $leaseExpiresAt, $runId, $hash, $queued, $now] = $params;
+        $row = $this->find((string) $runId, (string) $hash);
 
-        if ($row === null || $row['status'] !== $queued) {
+        if ($row === null || !$this->isClaimable($row, (string) $queued, (string) $processing, (int) $now)) {
             return 0;
         }
 
         $row['status'] = $processing;
+        $row['worker_token'] = $worker;
+        $row['lease_expires_at'] = $leaseExpiresAt;
         $row['fetch_attempts'] = (int) $row['fetch_attempts'] + 1;
         $this->replace($row);
 
@@ -187,22 +234,29 @@ final class FakeWpDbGateway implements WpDbGateway
      */
     private function retry(array $params): int
     {
-        [$queued, $retryAt, $hash] = $params;
-        $row = $this->find((string) $hash);
+        // [queued, retryAt, runId, hash]
+        [$queued, $retryAt, $runId, $hash] = $params;
+        $row = $this->find((string) $runId, (string) $hash);
 
         if ($row === null) {
             return 0;
         }
 
         // Same changed-row semantics as transition(): re-queuing a row whose
-        // status and retry time already match affects 0 rows in MariaDB, so the
-        // repository's existence re-check, not the affected count, decides.
-        if ($row['status'] === $queued && (int) $row['retry_at'] === $retryAt) {
+        // status, retry time and lease state already match affects 0 rows in
+        // MariaDB, so the repository's existence re-check, not the affected
+        // count, decides.
+        if (
+            $row['status'] === $queued && (int) $row['retry_at'] === $retryAt
+            && $row['worker_token'] === '' && (int) $row['lease_expires_at'] === 0
+        ) {
             return 0;
         }
 
         $row['status'] = $queued;
         $row['retry_at'] = $retryAt;
+        $row['worker_token'] = '';
+        $row['lease_expires_at'] = 0;
         $this->replace($row);
 
         return 1;
@@ -213,8 +267,9 @@ final class FakeWpDbGateway implements WpDbGateway
      */
     private function setPriority(array $params): int
     {
-        [$priority, $hash] = $params;
-        $row = $this->find((string) $hash);
+        // [priority, runId, hash]
+        [$priority, $runId, $hash] = $params;
+        $row = $this->find((string) $runId, (string) $hash);
 
         if ($row === null) {
             return 0;
@@ -231,32 +286,40 @@ final class FakeWpDbGateway implements WpDbGateway
      */
     private function transition(array $params): int
     {
-        [$status, $hash] = $params;
-        $row = $this->find((string) $hash);
+        // [status, runId, hash]
+        [$status, $runId, $hash] = $params;
+        $row = $this->find((string) $runId, (string) $hash);
 
         if ($row === null) {
             return 0;
         }
 
-        // MariaDB reports changed rows, not matched rows: an UPDATE that sets
-        // the status to its stored value affects 0 rows even though the row
-        // exists. The repository re-checks existence after the write to
-        // disambiguate unchanged-but-present from an unknown hash.
-        if ($row['status'] === $status) {
+        // MariaDB reports changed rows, not matched rows: a transition that
+        // sets the status, worker token and lease to their stored values
+        // affects 0 rows even though the row exists. The repository
+        // re-checks existence after the write to disambigate
+        // unchanged-but-present from an unknown hash.
+        if ($row['status'] === $status && $row['worker_token'] === '' && (int) $row['lease_expires_at'] === 0) {
             return 0;
         }
 
         $row['status'] = $status;
+        $row['worker_token'] = '';
+        $row['lease_expires_at'] = 0;
         $this->replace($row);
 
         return 1;
     }
 
-    private function nextQueuedHash(int $now): ?string
+    /**
+     * Claim peek: the lowest-priority row of the run that is queued with a
+     * due retry, or in flight on an expired lease.
+     */
+    private function nextClaimableHash(string $runId, int $now): ?string
     {
         $candidates = [];
-        foreach ($this->rows as $row) {
-            if ($row['status'] === 'queued' && (int) $row['retry_at'] <= $now) {
+        foreach ($this->rowsInRun($runId) as $row) {
+            if ($this->isClaimable($row, 'queued', 'processing', $now)) {
                 $candidates[] = $row;
             }
         }
@@ -265,9 +328,25 @@ final class FakeWpDbGateway implements WpDbGateway
             return null;
         }
 
-        usort($candidates, static fn (array $a, array $b): int => [$a['priority'], 0] <=> [$b['priority'], 0]);
+        usort($candidates, static fn (array $a, array $b): int => $a['priority'] <=> $b['priority']);
 
         return (string) $candidates[0]['url_hash'];
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     */
+    private function isClaimable(array $row, string $queued, string $processing, int $now): bool
+    {
+        if ($row['status'] === $queued) {
+            return (int) $row['retry_at'] <= $now;
+        }
+
+        // An in-flight row is reclaimable only when it carries a lease and
+        // that lease has lapsed; a live lease is never stolen.
+        return $row['status'] === $processing
+            && (int) $row['lease_expires_at'] > 0
+            && (int) $row['lease_expires_at'] <= $now;
     }
 
     /**
@@ -297,12 +376,23 @@ final class FakeWpDbGateway implements WpDbGateway
     }
 
     /**
+     * @return list<array<string, mixed>>
+     */
+    private function rowsInRun(string $runId): array
+    {
+        return array_values(array_filter(
+            $this->rows,
+            static fn (array $row): bool => $row['run_id'] === $runId,
+        ));
+    }
+
+    /**
      * @return array<string, mixed>|null
      */
-    private function find(string $hash): ?array
+    private function find(string $runId, string $hash): ?array
     {
         foreach ($this->rows as $row) {
-            if ($row['url_hash'] === $hash) {
+            if ($row['run_id'] === $runId && $row['url_hash'] === $hash) {
                 return $row;
             }
         }
@@ -316,7 +406,7 @@ final class FakeWpDbGateway implements WpDbGateway
     private function replace(array $row): void
     {
         foreach ($this->rows as $index => $existing) {
-            if ($existing['url_hash'] === $row['url_hash']) {
+            if ($existing['run_id'] === $row['run_id'] && $existing['url_hash'] === $row['url_hash']) {
                 $this->rows[$index] = $row;
 
                 return;

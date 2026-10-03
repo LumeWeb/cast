@@ -16,6 +16,12 @@ namespace LumeWeb\Cast\Export;
 final class PipelineState
 {
     /**
+     * The run this state is currently carrying. The orchestrator stamps it
+     * before any stage unit runs, so each stage scopes its queue calls to it.
+     */
+    public string $runId = '';
+
+    /**
      * Filled by {@see ProbeStage} once the home page answered with a plausible
      * 200 or an acceptable canonical redirect; null before/unless the probe
      * succeeds.

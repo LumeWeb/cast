@@ -93,13 +93,13 @@ final class RewriteStage implements PipelineStage
         // returning pages until
         // the rewritable-Done fixed point is reached, so collected assets are
         // never claimed out of order.
-        $item = $this->repository->claimNextRewritable();
+        $item = $this->repository->claimNextRewritable($this->state->runId);
         if ($item !== null) {
             return $this->rewriteUnit($item, $origin, $workDir, $assetsCollected);
         }
 
         // True fixed point: nothing rewritable remains and nothing is pending.
-        if ($this->repository->pendingCount() === 0) {
+        if ($this->repository->pendingCount($this->state->runId) === 0) {
             $this->state->rewrite = $this->summary($assetsCollected);
 
             return StageResult::done('', 0);
@@ -153,7 +153,7 @@ final class RewriteStage implements PipelineStage
         int $assetsCollected,
         CaptureEnvironment $capture,
     ): StageResult {
-        $item = $this->repository->claimNext();
+        $item = $this->repository->claimNext($this->state->runId);
         if ($item === null) {
             // Nothing is claimable (e.g. a scheduled retry is not due yet):
             // stay open without spinning, exactly like the capture stage waits.
@@ -161,7 +161,7 @@ final class RewriteStage implements PipelineStage
         }
 
         $result = $capture->captureService($origin, $workDir)->capture($item);
-        $this->outcomeApplier->apply($this->repository, $item, $result);
+        $this->outcomeApplier->apply($this->state->runId, $this->repository, $item, $result);
 
         // A successful capture that is text-like is rewritten immediately so
         // one reconciled asset is never split across two progress units;
@@ -200,6 +200,7 @@ final class RewriteStage implements PipelineStage
 
         $warnings = new ArrayWarningCollector();
         $collector = new WorkItemQueueCollector(
+            $this->state->runId,
             $this->repository,
             self::DISCOVERED_PRIORITY,
             $this->maxAssets,
@@ -215,7 +216,7 @@ final class RewriteStage implements PipelineStage
             ->rewrite($item, $body, $context, $warnings);
 
         $this->environment->writeBody($item->outputPath(), $rewritten);
-        $this->repository->transition($item->urlHash(), WorkItemStatus::Rewritten);
+        $this->repository->transition($this->state->runId, $item->urlHash(), WorkItemStatus::Rewritten);
 
         $usedAfter = $assetsCollected + $collector->collectedCount();
         $surface = $this->surfaceWarnings($warnings);
@@ -291,8 +292,8 @@ final class RewriteStage implements PipelineStage
     private function summary(int $assetsCollected): RewriteSummary
     {
         return new RewriteSummary(
-            $this->repository->countByStatus(WorkItemStatus::Rewritten),
-            $this->repository->countByStatus(WorkItemStatus::Done),
+            $this->repository->countByStatus($this->state->runId, WorkItemStatus::Rewritten),
+            $this->repository->countByStatus($this->state->runId, WorkItemStatus::Done),
             assetsCollected: $assetsCollected,
         );
     }

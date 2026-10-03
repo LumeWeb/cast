@@ -36,6 +36,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class RewriteAssetReconciliationTest extends TestCase
 {
+    private const RUN = 'run-1';
     private const ORIGIN = 'https://example.test/';
 
     private const LOGO = 'wp-content/uploads/logo.png';
@@ -79,10 +80,10 @@ final class RewriteAssetReconciliationTest extends TestCase
         self::assertNull($result->failure);
         // Grep-proof the policy end-to-end: the page link was never enqueued,
         // while the embedded asset joined the queue for reconciliation.
-        self::assertNull($this->repo->priorityOf($this->hash('https://example.test/about/')), 'page link has no row at all');
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertNull($this->repo->priorityOf(self::RUN, $this->hash('https://example.test/about/')), 'page link has no row at all');
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
         $logo = $this->factory->fromString('https://example.test/wp-content/uploads/logo.png');
-        self::assertSame(1, $this->repo->priorityOf($logo->urlHash()));
+        self::assertSame(1, $this->repo->priorityOf(self::RUN, $logo->urlHash()));
         self::assertSame(self::LOGO, $logo->outputPath());
     }
 
@@ -118,7 +119,7 @@ final class RewriteAssetReconciliationTest extends TestCase
             $this->insert($url);
         }
         foreach ($failed as $url) {
-            $this->repo->transition($this->factory->fromString($url)->urlHash(), WorkItemStatus::Failed);
+            $this->repo->transition(self::RUN, $this->factory->fromString($url)->urlHash(), WorkItemStatus::Failed);
         }
 
         // The reconciliation pass fetches the collected assets in claim order: the stylesheet
@@ -138,10 +139,10 @@ final class RewriteAssetReconciliationTest extends TestCase
         // captured and rewrote in-tick; the fixed assets (favicon + logo +
         // hero) pass through Done untouched and the 3 failed captures stay
         // terminal Failed — none of them pending.
-        self::assertSame(12, $this->repo->countByStatus(WorkItemStatus::Rewritten));
-        self::assertSame(3, $this->repo->countByStatus(WorkItemStatus::Done), 'favicon + logo + hero pass through');
-        self::assertSame(3, $this->repo->countByStatus(WorkItemStatus::Failed));
-        self::assertSame(0, $this->repo->pendingCount(), 'the pack gate must see zero pending work');
+        self::assertSame(12, $this->repo->countByStatus(self::RUN, WorkItemStatus::Rewritten));
+        self::assertSame(3, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done), 'favicon + logo + hero pass through');
+        self::assertSame(3, $this->repo->countByStatus(self::RUN, WorkItemStatus::Failed));
+        self::assertSame(0, $this->repo->pendingCount(self::RUN,), 'the pack gate must see zero pending work');
 
         $summary = $this->state->rewrite;
         self::assertNotNull($summary);
@@ -189,24 +190,24 @@ final class RewriteAssetReconciliationTest extends TestCase
         $first = $stageA->execute('');
         self::assertFalse($first->done);
         self::assertNotEmpty($first->cursor, 'the cursor carries the collected-asset count into the next tick');
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Queued), 'the stylesheet is collected by phase 1');
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued), 'the stylesheet is collected by phase 1');
 
         // A fresh stage instance restarts from the persisted cursor: the reconciliation pass
         // claims the stylesheet, captures + rewrites it in one tick, and the
         // secondary hero image it discovered is captured next.
         $second = $this->stage($env, $transport)->execute($first->cursor);
         self::assertFalse($second->done);
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Rewritten), 'the page and the stylesheet were rewritten');
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Rewritten), 'the page and the stylesheet were rewritten');
 
         $third = $this->stage($env, $transport)->execute($second->cursor);
         self::assertFalse($third->done);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Done), 'the hero image stays binary Done');
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done), 'the hero image stays binary Done');
 
         $final = $this->stage($env, $transport)->execute($third->cursor);
         self::assertTrue($final->done);
-        self::assertSame(0, $this->repo->pendingCount());
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Rewritten));
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Done));
+        self::assertSame(0, $this->repo->pendingCount(self::RUN));
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Rewritten));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done));
     }
 
     public function testCollectedAssetCapRestrictsNewAssetsRecordsWarningAndDrainsBacklog(): void
@@ -226,16 +227,16 @@ final class RewriteAssetReconciliationTest extends TestCase
         self::assertFalse($first->done);
         self::assertNotEmpty($first->warnings, 'the cap crossing surfaces a warning');
         self::assertStringContainsString('cap of 2', $first->warnings[0]);
-        self::assertNull($this->repo->priorityOf($this->hash('https://example.test/wp-content/uploads/c.png')), 'c was refused');
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Queued), 'a and b were collected');
+        self::assertNull($this->repo->priorityOf(self::RUN, $this->hash('https://example.test/wp-content/uploads/c.png')), 'c was refused');
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued), 'a and b were collected');
 
         $final = $this->drainAll($this->stage($env, $transport, maxAssets: 2), seedCursor: $first->cursor);
 
         self::assertTrue($final->done);
         self::assertNull($final->failure);
-        self::assertSame(0, $this->repo->pendingCount(), 'the collected backlog drains to the fixed point');
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Rewritten));
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Done));
+        self::assertSame(0, $this->repo->pendingCount(self::RUN,), 'the collected backlog drains to the fixed point');
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Rewritten));
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done));
     }
 
     public function testFailedAssetDoesNotBlockConvergence(): void
@@ -251,9 +252,9 @@ final class RewriteAssetReconciliationTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(0, $this->repo->pendingCount());
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Failed), 'a missing asset is terminal, not blocking');
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Rewritten));
+        self::assertSame(0, $this->repo->pendingCount(self::RUN));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Failed), 'a missing asset is terminal, not blocking');
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Rewritten));
     }
 
     private function insertDonePage(string $url, string $body): WorkItem
@@ -267,7 +268,7 @@ final class RewriteAssetReconciliationTest extends TestCase
     private function insertDone(string $url): WorkItem
     {
         $item = $this->insert($url);
-        $this->repo->transition($item->urlHash(), WorkItemStatus::Done);
+        $this->repo->transition(self::RUN, $item->urlHash(), WorkItemStatus::Done);
 
         return $item;
     }
@@ -275,7 +276,7 @@ final class RewriteAssetReconciliationTest extends TestCase
     private function insert(string $url): WorkItem
     {
         $item = $this->factory->fromString($url);
-        $this->repo->insertCanonical($item);
+        $this->repo->insertCanonical(self::RUN, $item);
 
         return $item;
     }
@@ -326,6 +327,7 @@ final class RewriteAssetReconciliationTest extends TestCase
     private function state(): PipelineState
     {
         $state = new PipelineState();
+        $state->runId = self::RUN;
         $origin = Origin::fromUrl((new UrlCanonicalizer())->canonicalize(self::ORIGIN));
         $state->probe = new ProbeResult($origin, self::ORIGIN, 2048, 5);
         $state->setup = new SetupResult($this->workDir);

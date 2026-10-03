@@ -353,53 +353,64 @@ final class ContentPublishSchedulerTest extends TestCase
     {
         $workItems = new InMemoryWorkItemRepository();
         $service = $this->makeService(workItems: $workItems);
-        $workItems->insertCanonical((new WorkItemFactory())->fromString('https://example.com/stale/'));
+        // The first run created at t=1000 gets the deterministic id
+        // run-1000-1: seed that NEW run's queue slice with a stale row so the
+        // test observes the creation clearing it.
+        $workItems->insertCanonical('run-1000-1', (new WorkItemFactory())->fromString('https://example.com/stale/'));
 
-        // Creating the first run must empty the queue: the fresh per-run work
-        // directory must never inherit the prior run's terminal rows.
+        // Creating the first run must empty the new run's queue slice: the
+        // fresh per-run work directory must never inherit stale terminal rows.
         $service->onContentPublished(at: 1000);
-        self::assertSame(0, $workItems->pendingCount(), 'a new run starts from a clean queue');
+        $runId = $this->repository->latest()?->runId;
+        self::assertNotNull($runId);
+        self::assertSame(0, $workItems->pendingCount($runId), 'a new run starts from a clean queue');
 
         // Subsequent content events only absorb the still queued run — they
         // must NOT clear again, or work already queued for the current run
         // would be dropped (clear once per new run id, never per event/tick).
-        $workItems->insertCanonical((new WorkItemFactory())->fromString('https://example.com/current/'));
+        $workItems->insertCanonical($runId, (new WorkItemFactory())->fromString('https://example.com/current/'));
         $service->onContentPublished(at: 1010);
-        self::assertSame(1, $workItems->pendingCount(), 'an absorbed run never clears the queue');
+        self::assertSame(1, $workItems->pendingCount($runId), 'an absorbed run never clears the queue');
 
         // A plain status/repository read is never a run creation and never
         // clears either.
         $seen = $this->repository->latest();
         self::assertNotNull($seen);
-        self::assertSame(1, $workItems->pendingCount());
+        self::assertSame(1, $workItems->pendingCount($runId));
     }
 
     public function testContentAfterTerminalRunClearsTheQueueSoRunTwoRedisCoversRoot(): void
     {
-        // Run 1 completes, leaving the root page rewritten in the shared queue
-        // (the live starvation shape: first-seen-wins would never re-queue a
-        // finished row, so the fresh per-run workdir is starved of the root
-        // index.html and pack fails).
+        // Run 1 completes, leaving the root page rewritten in run 1's slice of
+        // the shared queue. Run 2 is a brand-new run id with its own queue
+        // slice, cleared at creation: its discovery re-enqueues `/` into its
+        // OWN slice instead of deduping it into a finished row.
         $workItems = new InMemoryWorkItemRepository();
         $service = $this->makeService(workItems: $workItems);
         $root = (new WorkItemFactory())->fromString('https://example.com/');
-        self::assertTrue($workItems->insertCanonical($root)->inserted());
-        $workItems->transition($root->urlHash(), WorkItemStatus::Done);
-        $workItems->transition($root->urlHash(), WorkItemStatus::Rewritten);
+        self::assertTrue($workItems->insertCanonical('run-1', $root)->inserted());
+        $workItems->transition('run-1', $root->urlHash(), WorkItemStatus::Done);
+        $workItems->transition('run-1', $root->urlHash(), WorkItemStatus::Rewritten);
 
         $run = $this->makeRun('run-1', 800);
         $run->start(at: 800);
         $run->complete(at: 900);
         $this->repository->save($run);
 
-        // Run 2 is created: the scheduler must empty the queue up front so the
-        // next discovery re-enqueues `/` instead of deduping it into oblivion.
+        // Run 2 is created: the scheduler clears the NEW run's own slice up
+        // front so the next discovery starts from a clean per-run queue.
         $service->onContentPublished(at: 1000);
 
-        $outcome = $workItems->insertCanonical($root, 1);
+        $next = $this->repository->latest();
+        self::assertNotNull($next);
+        self::assertNotSame('run-1', $next->runId);
+        $run2 = $next->runId;
+
+        $outcome = $workItems->insertCanonical($run2, $root, 1);
         self::assertTrue($outcome->inserted(), 'run 2 must re-discover and re-queue the root page');
-        self::assertSame(0, $workItems->countByStatus(WorkItemStatus::Rewritten));
-        self::assertSame(1, $workItems->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(1, $workItems->countByStatus($run2, WorkItemStatus::Queued));
+        // Run 1's terminal rows are another run's slice: never touched.
+        self::assertSame(1, $workItems->countByStatus('run-1', WorkItemStatus::Rewritten));
     }
 
     public function testManualDriftRunIsNotExplicitSoItWaitsForTheUser(): void

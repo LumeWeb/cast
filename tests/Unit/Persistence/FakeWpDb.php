@@ -87,7 +87,32 @@ final class FakeWpDb
     {
         $this->prepared[] = [$query, array_values($args)];
 
-        return 'PREPARED(' . count($this->prepared) . ')';
+        // Faithful placeholder substitution so recorded queries read like real
+        // MySQL: %i -> `identifier`, %s -> 'string', %d -> int.
+        $out = '';
+        $index = 0;
+        foreach (preg_split('/(%%|%d|%s|%i)/', $query, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY) ?: [] as $part) {
+            if ($part === '%i' || $part === '%s' || $part === '%d') {
+                $value = $args[$index] ?? '';
+                ++$index;
+                $out .= match ($part) {
+                    '%i' => '`' . $value . '`',
+                    '%d' => (string) (int) $value,
+                    default => "'" . addslashes((string) $value) . "'",
+                };
+            } elseif ($part === '%%') {
+                $out .= '%';
+            } else {
+                $out .= $part;
+            }
+        }
+
+        return $out;
+    }
+
+    public function esc_like(string $text): string
+    {
+        return addcslashes($text, '_%\\');
     }
 
     public function query(string $query): int|false

@@ -68,6 +68,7 @@ use PHPUnit\Framework\TestCase;
 
 final class PublishSetupServiceTest extends TestCase
 {
+    private const RUN = 'run-1';
     private FixedClock $clock;
 
     private InMemoryRunRepository $repository;
@@ -209,12 +210,12 @@ final class PublishSetupServiceTest extends TestCase
         foreach ($tallies as $status => $count) {
             for ($i = 0; $i < $count; ++$i) {
                 $item = $factory->fromString(sprintf('https://example.com/item-%s-%d', $status, $n++));
-                $repo->insertCanonical($item);
-                $repo->transition($item->urlHash(), WorkItemStatus::from($status));
+                $repo->insertCanonical(self::RUN, $item);
+                $repo->transition(self::RUN, $item->urlHash(), WorkItemStatus::from($status));
             }
         }
 
-        return new RepositoryWorkItemStateProvider($repo);
+        return new RepositoryWorkItemStateProvider($repo, fn (): string => self::RUN);
     }
 
     private function resolvedConnectionResolver(): ConnectionResolver

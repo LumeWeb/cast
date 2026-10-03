@@ -31,6 +31,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class CaptureStageTest extends TestCase
 {
+    private const RUN = 'run-1';
     private const ORIGIN = 'https://example.test/';
 
     private int $now;
@@ -77,13 +78,13 @@ final class CaptureStageTest extends TestCase
 
     public function testRequiresSuccessfulProbeBeforeCapture(): void
     {
-        $stage = $this->stage($this->environment(new FakeCaptureTransport([])), new PipelineState());
+        $stage = $this->stage($this->environment(new FakeCaptureTransport([])), $this->state());
 
         $result = $stage->execute('');
 
         self::assertNotNull($result->failure);
         self::assertStringContainsString('probe', strtolower($result->failure));
-        self::assertSame(0, $this->repo->countByStatus(WorkItemStatus::Processing));
+        self::assertSame(0, $this->repo->countByStatus(self::RUN, WorkItemStatus::Processing));
     }
 
     public function testRequiresSuccessfulSetupBeforeCapture(): void
@@ -96,7 +97,29 @@ final class CaptureStageTest extends TestCase
 
         self::assertNotNull($result->failure);
         self::assertStringContainsString('setup', strtolower($result->failure));
-        self::assertSame(0, $this->repo->countByStatus(WorkItemStatus::Processing));
+        self::assertSame(0, $this->repo->countByStatus(self::RUN, WorkItemStatus::Processing));
+    }
+
+    public function testOperatesOnlyOnTheStateRunScope(): void
+    {
+        // The stage reads its run scope from the shared PipelineState: it must
+        // claim from, and only from, that run's slice of the shared queue.
+        $state = $this->capturableState();
+        $state->runId = 'run-1';
+
+        $intruder = $this->factory->fromString('https://other.test/intruder/');
+        $this->repo->insertCanonical('run-2', $intruder);
+        $mine = $this->factory->fromString('https://example.test/mine/');
+        $this->repo->insertCanonical('run-1', $mine);
+
+        $transport = new FakeCaptureTransport([
+            CaptureResponse::withString(200, [], $this->html('ok')),
+        ]);
+        $result = $this->stage($this->environment($transport), $state)->execute('');
+
+        self::assertNull($result->failure);
+        self::assertSame(1, $this->repo->countByStatus('run-1', WorkItemStatus::Done), 'the stage claims from its own run and captures it');
+        self::assertSame(1, $this->repo->countByStatus('run-2', WorkItemStatus::Queued), 'another run\'s rows are untouched');
     }
 
     public function testClaimsExactlyOneQueuedItemPerTick(): void
@@ -114,8 +137,8 @@ final class CaptureStageTest extends TestCase
 
         self::assertFalse($result->done);
         self::assertSame(1, $result->progress);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Done));
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done));
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
         self::assertNull($this->state->capture);
     }
 
@@ -125,14 +148,14 @@ final class CaptureStageTest extends TestCase
             CaptureResponse::withString(200, [], $this->html('low')),
             CaptureResponse::withString(200, [], $this->html('high')),
         ]);
-        $this->repo->insertCanonical($this->factory->fromString('https://example.test/high/'), 10);
-        $this->repo->insertCanonical($this->factory->fromString('https://example.test/low/'), 1);
+        $this->repo->insertCanonical(self::RUN, $this->factory->fromString('https://example.test/high/'), 10);
+        $this->repo->insertCanonical(self::RUN, $this->factory->fromString('https://example.test/low/'), 1);
 
         $result = $this->stage($this->environment($transport))->execute('');
 
         self::assertFalse($result->done);
         self::assertSame(['https://example.test/low/'], $transport->requested);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Done));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done));
     }
 
     public function testFetchedPageIsMarkedDoneAndWritten(): void
@@ -146,7 +169,7 @@ final class CaptureStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Done));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done));
         self::assertSame($this->html('about page'), $this->readOutput('about/index.html'));
     }
 
@@ -160,7 +183,7 @@ final class CaptureStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Done));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done));
         self::assertSame([], $transport->requested);
         self::assertSame('BODY { color: red; }', $this->readOutput('wp-content/themes/x/style.css'));
     }
@@ -174,8 +197,8 @@ final class CaptureStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Failed));
-        self::assertSame(1, $this->repo->attemptCountOf($this->hash('https://example.test/gone/')));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Failed));
+        self::assertSame(1, $this->repo->attemptCountOf(self::RUN, $this->hash('https://example.test/gone/')));
     }
 
     public function test403MarksItemFailed(): void
@@ -189,7 +212,7 @@ final class CaptureStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Failed));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Failed));
     }
 
     public function testGhostGuardMarksItemFailed(): void
@@ -203,7 +226,7 @@ final class CaptureStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Failed));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Failed));
     }
 
     public function testOffOriginRedirectMarksItemSkipped(): void
@@ -217,7 +240,7 @@ final class CaptureStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Skipped));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Skipped));
     }
 
     public function testCanonicalTwinRedirectMarksItemSkipped(): void
@@ -231,7 +254,7 @@ final class CaptureStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Skipped));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Skipped));
         self::assertFalse($this->outputExists('about/index.html'), 'a twin writes no stub next to the canonical');
     }
 
@@ -246,7 +269,7 @@ final class CaptureStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Done));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done));
         self::assertTrue($this->outputExists('old/index.html'));
     }
 
@@ -263,18 +286,18 @@ final class CaptureStageTest extends TestCase
 
         self::assertFalse($first->done);
         self::assertSame(1, $first->progress);
-        self::assertSame(1, $this->repo->attemptCountOf($hash), 'one queue claim happened');
-        self::assertSame(0, $this->repo->countByStatus(WorkItemStatus::Done));
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Failed), 'the shared budget is exhausted');
-        self::assertSame(0, $this->repo->countByStatus(WorkItemStatus::Queued), 'no queue-level retry is scheduled');
-        self::assertSame(0, $this->repo->pendingCount());
+        self::assertSame(1, $this->repo->attemptCountOf(self::RUN, $hash), 'one queue claim happened');
+        self::assertSame(0, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Failed), 'the shared budget is exhausted');
+        self::assertSame(0, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued), 'no queue-level retry is scheduled');
+        self::assertSame(0, $this->repo->pendingCount(self::RUN));
 
         // The queue fixed point is reached on the next tick.
         $second = $this->stage($env)->execute('');
 
         self::assertTrue($second->done);
         self::assertSame('', $second->cursor);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Failed));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Failed));
     }
 
     public function testRetryableOutcomeIsFetchedAtMostThreeTimes(): void
@@ -290,8 +313,8 @@ final class CaptureStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Failed));
-        self::assertSame(0, $this->repo->pendingCount());
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Failed));
+        self::assertSame(0, $this->repo->pendingCount(self::RUN));
         self::assertCount(
             RetryPolicy::MAX_ATTEMPTS,
             $transport->requested,
@@ -313,8 +336,8 @@ final class CaptureStageTest extends TestCase
         self::assertTrue($result->done);
         self::assertNull($result->failure);
         self::assertSame('', $result->cursor);
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Done));
-        self::assertSame(0, $this->repo->pendingCount());
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done));
+        self::assertSame(0, $this->repo->pendingCount(self::RUN));
     }
 
     public function testCaptureSummaryTalliesFinalStatuses(): void
@@ -350,9 +373,17 @@ final class CaptureStageTest extends TestCase
         self::assertSame(0, $summary->skipped);
     }
 
+    private function state(): PipelineState
+    {
+        $state = new PipelineState();
+        $state->runId = self::RUN;
+
+        return $state;
+    }
+
     private function insert(string $url): void
     {
-        $this->repo->insertCanonical($this->factory->fromString($url));
+        $this->repo->insertCanonical(self::RUN, $this->factory->fromString($url));
     }
 
     private function hash(string $url): string
@@ -389,7 +420,7 @@ final class CaptureStageTest extends TestCase
 
     private function capturableState(): PipelineState
     {
-        $state = new PipelineState();
+        $state = $this->state();
         $origin = Origin::fromUrl((new UrlCanonicalizer())->canonicalize(self::ORIGIN));
         $state->probe = new ProbeResult($origin, self::ORIGIN, 2048, 5);
         $state->setup = new SetupResult($this->workDir);

@@ -9,11 +9,14 @@ namespace LumeWeb\Cast\Export;
  *
  * Implements the canonical-insert contract exactly so the SQL implementation
  * can be verified against it later:
- *  - rows are deduplicated by url_hash;
+ *  - rows are scoped to their export run and deduplicated by (run, url_hash);
  *  - a completed (done) row is never replaced or re-prioritized — the first
  *    successful item wins forever;
  *  - a lower numeric priority may replace the stored priority of any other
- *    row, but the status is left untouched (processed state is not reset).
+ *    row, but the status is left untouched (processed state is not reset);
+ *  - claims are lease-based: the claiming worker token and a lease expiry are
+ *    recorded, a live lease is never stolen, and an expired lease makes the
+ *    in-flight row reclaimable; terminal/retry transitions clear ownership.
  */
 final class InMemoryWorkItemRepository implements WorkItemRepository
 {
@@ -23,7 +26,9 @@ final class InMemoryWorkItemRepository implements WorkItemRepository
     private readonly \Closure $clock;
 
     /**
-     * @var array<string, array{item: WorkItem, priority: int, status: WorkItemStatus, attempts: int, retryAt: int}>
+     * Rows keyed by run id, then url hash.
+     *
+     * @var array<string, array<string, array{item: WorkItem, priority: int, status: WorkItemStatus, attempts: int, retryAt: int, worker: string, leaseExpiresAt: int}>>
      */
     private array $rows = [];
 
@@ -32,28 +37,30 @@ final class InMemoryWorkItemRepository implements WorkItemRepository
         $this->clock = $clock ?? static fn(): int => time();
     }
 
-    public function insertCanonical(WorkItem $workItem, int $priority = 10): InsertOutcome
+    public function insertCanonical(string $runId, WorkItem $workItem, int $priority = 10): InsertOutcome
     {
         $hash = $workItem->urlHash();
 
-        if (!isset($this->rows[$hash])) {
-            $this->rows[$hash] = [
+        if (!isset($this->rows[$runId][$hash])) {
+            $this->rows[$runId][$hash] = [
                 'item' => $workItem,
                 'priority' => $priority,
                 'status' => WorkItemStatus::Queued,
                 'attempts' => 0,
                 'retryAt' => 0,
+                'worker' => '',
+                'leaseExpiresAt' => 0,
             ];
 
             return InsertOutcome::created();
         }
 
-        if ($this->rows[$hash]['status'] === WorkItemStatus::Done) {
+        if ($this->rows[$runId][$hash]['status'] === WorkItemStatus::Done) {
             return InsertOutcome::duplicate();
         }
 
-        if ($priority < $this->rows[$hash]['priority']) {
-            $this->rows[$hash]['priority'] = $priority;
+        if ($priority < $this->rows[$runId][$hash]['priority']) {
+            $this->rows[$runId][$hash]['priority'] = $priority;
 
             return InsertOutcome::priorityReplaced();
         }
@@ -61,15 +68,15 @@ final class InMemoryWorkItemRepository implements WorkItemRepository
         return InsertOutcome::duplicate();
     }
 
-    public function priorityOf(string $urlHash): ?int
+    public function priorityOf(string $runId, string $urlHash): ?int
     {
-        return $this->rows[$urlHash]['priority'] ?? null;
+        return $this->rows[$runId][$urlHash]['priority'] ?? null;
     }
 
-    public function countByStatus(WorkItemStatus $status): int
+    public function countByStatus(string $runId, WorkItemStatus $status): int
     {
         $count = 0;
-        foreach ($this->rows as $row) {
+        foreach ($this->rows[$runId] ?? [] as $row) {
             if ($row['status'] === $status) {
                 ++$count;
             }
@@ -78,35 +85,39 @@ final class InMemoryWorkItemRepository implements WorkItemRepository
         return $count;
     }
 
-    public function pendingCount(): int
+    public function pendingCount(string $runId): int
     {
-        return $this->countByStatus(WorkItemStatus::Queued) + $this->countByStatus(WorkItemStatus::Processing);
+        return $this->countByStatus($runId, WorkItemStatus::Queued) + $this->countByStatus($runId, WorkItemStatus::Processing);
     }
 
-    public function hasPending(): bool
+    public function hasPending(string $runId): bool
     {
-        return $this->pendingCount() > 0;
+        return $this->pendingCount($runId) > 0;
     }
 
-    public function transition(string $urlHash, WorkItemStatus $status): bool
+    public function transition(string $runId, string $urlHash, WorkItemStatus $status): bool
     {
-        if (!isset($this->rows[$urlHash])) {
+        if (!isset($this->rows[$runId][$urlHash])) {
             return false;
         }
 
-        $this->rows[$urlHash]['status'] = $status;
+        // A transition ends whatever lease the row carried: a finished or
+        // re-queued row must never read as in-flight work of a dead worker.
+        $this->rows[$runId][$urlHash]['status'] = $status;
+        $this->rows[$runId][$urlHash]['worker'] = '';
+        $this->rows[$runId][$urlHash]['leaseExpiresAt'] = 0;
 
         return true;
     }
 
-    public function claimNext(): ?WorkItem
+    public function claimNext(string $runId, string $worker = WorkItemRepository::DEFAULT_WORKER, int $leaseSeconds = WorkItemRepository::DEFAULT_LEASE_SECONDS): ?WorkItem
     {
         $now = ($this->clock)();
 
         $bestHash = null;
         $bestPriority = PHP_INT_MAX;
-        foreach ($this->rows as $hash => $row) {
-            if ($row['status'] !== WorkItemStatus::Queued || $row['retryAt'] > $now) {
+        foreach ($this->rows[$runId] ?? [] as $hash => $row) {
+            if (!$this->isClaimable($row, $now)) {
                 continue;
             }
             if ($row['priority'] < $bestPriority) {
@@ -119,40 +130,43 @@ final class InMemoryWorkItemRepository implements WorkItemRepository
             return null;
         }
 
-        $claimed = $this->rows[$bestHash];
-        $this->rows[$bestHash] = [
-            'item' => $claimed['item'],
-            'priority' => $claimed['priority'],
+        $this->rows[$runId][$bestHash] = [
+            'item' => $this->rows[$runId][$bestHash]['item'],
+            'priority' => $this->rows[$runId][$bestHash]['priority'],
             'status' => WorkItemStatus::Processing,
-            'attempts' => $claimed['attempts'] + 1,
-            'retryAt' => $claimed['retryAt'],
+            'attempts' => $this->rows[$runId][$bestHash]['attempts'] + 1,
+            'retryAt' => $this->rows[$runId][$bestHash]['retryAt'],
+            'worker' => $worker,
+            'leaseExpiresAt' => $now + max(0, $leaseSeconds),
         ];
 
-        return $this->rows[$bestHash]['item'];
+        return $this->rows[$runId][$bestHash]['item'];
     }
 
-    public function attemptCountOf(string $urlHash): int
+    public function attemptCountOf(string $runId, string $urlHash): int
     {
-        return $this->rows[$urlHash]['attempts'] ?? 0;
+        return $this->rows[$runId][$urlHash]['attempts'] ?? 0;
     }
 
-    public function scheduleRetry(string $urlHash, int $delaySeconds): bool
+    public function scheduleRetry(string $runId, string $urlHash, int $delaySeconds): bool
     {
-        if (!isset($this->rows[$urlHash])) {
+        if (!isset($this->rows[$runId][$urlHash])) {
             return false;
         }
 
-        $this->rows[$urlHash]['status'] = WorkItemStatus::Queued;
-        $this->rows[$urlHash]['retryAt'] = ($this->clock)() + max(0, $delaySeconds);
+        $this->rows[$runId][$urlHash]['status'] = WorkItemStatus::Queued;
+        $this->rows[$runId][$urlHash]['retryAt'] = ($this->clock)() + max(0, $delaySeconds);
+        $this->rows[$runId][$urlHash]['worker'] = '';
+        $this->rows[$runId][$urlHash]['leaseExpiresAt'] = 0;
 
         return true;
     }
 
-    public function claimNextRewritable(): ?WorkItem
+    public function claimNextRewritable(string $runId): ?WorkItem
     {
         $bestHash = null;
         $bestPriority = PHP_INT_MAX;
-        foreach ($this->rows as $hash => $row) {
+        foreach ($this->rows[$runId] ?? [] as $hash => $row) {
             if ($row['status'] !== WorkItemStatus::Done || !$this->isRewritable($row['item'])) {
                 continue;
             }
@@ -162,15 +176,32 @@ final class InMemoryWorkItemRepository implements WorkItemRepository
             }
         }
 
-        return $bestHash === null ? null : $this->rows[$bestHash]['item'];
+        return $bestHash === null ? null : $this->rows[$runId][$bestHash]['item'];
     }
 
-    public function clear(): void
+    public function clear(string $runId): void
     {
-        // A new run's discovery refills the queue; the prior run's terminal
-        // rows must not survive (first-seen-wins would otherwise starve the
-        // fresh per-run work directory with stale done/rewritten rows).
-        $this->rows = [];
+        // The cleared run's terminal rows must not survive: first-seen-wins
+        // would starve the fresh per-run work directory with stale rows.
+        $this->rows[$runId] = [];
+    }
+
+    /**
+     * In-flight rows are claimable only on an expired lease; a never-leased
+     * row (lease expiry 0) was transitioned without a claim and stays
+     * unclaimable.
+     *
+     * @param array{status: WorkItemStatus, retryAt: int, worker: string, leaseExpiresAt: int} $row
+     */
+    private function isClaimable(array $row, int $now): bool
+    {
+        if ($row['status'] === WorkItemStatus::Queued) {
+            return $row['retryAt'] <= $now;
+        }
+
+        return $row['status'] === WorkItemStatus::Processing
+            && $row['leaseExpiresAt'] > 0
+            && $row['leaseExpiresAt'] <= $now;
     }
 
     /**

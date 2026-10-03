@@ -45,7 +45,11 @@ final class SchemaUpgrader
             return;
         }
 
-        (new WordPressCastExportItemsTable())->install();
+        $itemsTable = new WordPressCastExportItemsTable();
+        $itemsTable->install();
+        // dbDelta cannot replace an existing unique key, so pre run-scoping
+        // tables need the legacy key swapped here; fresh installs are a no-op.
+        $itemsTable->migrateRunScope();
 
         update_option(self::VERSION_OPTION, $this->version);
     }

@@ -73,7 +73,7 @@ final class PackStageTest extends TestCase
 
     public function testRequiresSuccessfulProbeBeforePack(): void
     {
-        $result = $this->stage(new PipelineState())->execute('');
+        $result = $this->stage($this->state())->execute('');
 
         self::assertNotNull($result->failure);
         self::assertStringContainsString('probe', strtolower($result->failure));
@@ -93,7 +93,7 @@ final class PackStageTest extends TestCase
     public function testPendingItemsBlockPackingBeforeZipIsOpened(): void
     {
         $this->writeValidTree();
-        $this->repo->insertCanonical($this->factory->fromString(self::ORIGIN . 'pending/'));
+        $this->repo->insertCanonical(self::RUN_ID, $this->factory->fromString(self::ORIGIN . 'pending/'));
         $env = $this->environment();
 
         $result = $this->stage($this->state, $env, $this->repo)->execute('');
@@ -235,6 +235,14 @@ final class PackStageTest extends TestCase
         self::assertSame('', $result->cursor);
     }
 
+    private function state(): PipelineState
+    {
+        $state = new PipelineState();
+        $state->runId = self::RUN_ID;
+
+        return $state;
+    }
+
     private function stage(
         ?PipelineState $state = null,
         ?FakePackEnvironment $env = null,
@@ -255,7 +263,7 @@ final class PackStageTest extends TestCase
 
     private function packableState(): PipelineState
     {
-        $state = new PipelineState();
+        $state = $this->state();
         $origin = Origin::fromUrl((new UrlCanonicalizer())->canonicalize(self::ORIGIN));
         $state->probe = new ProbeResult($origin, self::ORIGIN, 2048, 5);
         $state->setup = new SetupResult($this->workDir);
@@ -275,8 +283,8 @@ final class PackStageTest extends TestCase
     private function insertDone(string $url): WorkItem
     {
         $item = $this->factory->fromString($url);
-        $this->repo->insertCanonical($item);
-        $this->repo->transition($item->urlHash(), WorkItemStatus::Done);
+        $this->repo->insertCanonical(self::RUN_ID, $item);
+        $this->repo->transition(self::RUN_ID, $item->urlHash(), WorkItemStatus::Done);
 
         return $item;
     }

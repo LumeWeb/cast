@@ -33,35 +33,35 @@ final class CaptureOutcomeApplier
     ) {
     }
 
-    public function apply(WorkItemRepository $repository, WorkItem $item, CaptureResult $result): void
+    public function apply(string $runId, WorkItemRepository $repository, WorkItem $item, CaptureResult $result): void
     {
         $urlHash = $item->urlHash();
 
         if ($result->outcome->isRetryable()) {
-            if ($repository->attemptCountOf($urlHash) + $result->attempts >= RetryPolicy::MAX_ATTEMPTS) {
-                $repository->transition($urlHash, WorkItemStatus::Failed);
+            if ($repository->attemptCountOf($runId, $urlHash) + $result->attempts >= RetryPolicy::MAX_ATTEMPTS) {
+                $repository->transition($runId, $urlHash, WorkItemStatus::Failed);
             } else {
-                $repository->scheduleRetry($urlHash, $result->retryDelaySeconds);
+                $repository->scheduleRetry($runId, $urlHash, $result->retryDelaySeconds);
             }
 
             return;
         }
 
-        $repository->transition($urlHash, match ($result->outcome) {
+        $repository->transition($runId, $urlHash, match ($result->outcome) {
             CaptureOutcome::CanonicalTwin, CaptureOutcome::OffOrigin => WorkItemStatus::Skipped,
             CaptureOutcome::Copied, CaptureOutcome::Fetched => WorkItemStatus::Done,
-            CaptureOutcome::Redirected => $this->redirected($repository, $item, $result),
+            CaptureOutcome::Redirected => $this->redirected($runId, $repository, $item, $result),
             default => WorkItemStatus::Failed,
         });
     }
 
-    private function redirected(WorkItemRepository $repository, WorkItem $item, CaptureResult $result): WorkItemStatus
+    private function redirected(string $runId, WorkItemRepository $repository, WorkItem $item, CaptureResult $result): WorkItemStatus
     {
         // A non-Page same-origin redirect writes no stub (and no file), so the
         // resolved target is queued as a fresh work item for a later capture;
         // the source row still lands Done with nothing written for it.
         if ($item->kind() !== WorkItemKind::Page && $result->redirectTarget !== null) {
-            $repository->insertCanonical($this->workItemFactory->fromString($result->redirectTarget));
+            $repository->insertCanonical($runId, $this->workItemFactory->fromString($result->redirectTarget));
         }
 
         return WorkItemStatus::Done;

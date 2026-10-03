@@ -838,13 +838,15 @@ final class PublishSetupService
             return $capture->done + $capture->failed + $capture->skipped;
         }
 
-        if ($this->workItems === null || self::pipelineStageFor($run) !== 'capture') {
+        if ($run === null || $this->workItems === null || self::pipelineStageFor($run) !== 'capture') {
             return null;
         }
 
-        return $this->workItems->countByStatus(WorkItemStatus::Done)
-            + $this->workItems->countByStatus(WorkItemStatus::Failed)
-            + $this->workItems->countByStatus(WorkItemStatus::Skipped);
+        $runId = $run->runId;
+
+        return $this->workItems->countByStatus($runId, WorkItemStatus::Done)
+            + $this->workItems->countByStatus($runId, WorkItemStatus::Failed)
+            + $this->workItems->countByStatus($runId, WorkItemStatus::Skipped);
     }
 
     /**
@@ -871,11 +873,11 @@ final class PublishSetupService
             return $rewrite->rewritten + $rewrite->passedThrough;
         }
 
-        if ($this->workItems === null || self::pipelineStageFor($run) !== 'rewrite') {
+        if ($run === null || $this->workItems === null || self::pipelineStageFor($run) !== 'rewrite') {
             return null;
         }
 
-        return $this->workItems->countByStatus(WorkItemStatus::Rewritten);
+        return $this->workItems->countByStatus($run->runId, WorkItemStatus::Rewritten);
     }
 
     private function isTerminalOnboarding(WizardState $state): bool

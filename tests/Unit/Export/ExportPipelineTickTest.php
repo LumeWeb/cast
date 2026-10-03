@@ -109,6 +109,21 @@ final class ExportPipelineTickTest extends TestCase
         return $stages;
     }
 
+    public function testTickPropagatesTheRunIdToTheSharedState(): void
+    {
+        // Every stage scopes its work-item queue calls to the run, and reads
+        // that scope from the shared PipelineState: the orchestrator must
+        // stamp the run id before any stage unit executes.
+        $state = new PipelineState();
+        $spy = $this->stageFinishingInOneUnit(PipelineStageKey::Probe);
+        $run = $this->startedRun('run-42');
+        $tick = $this->pipeline([PipelineStageKey::Probe->value => $spy], $state);
+
+        $tick->perform($run, 1001);
+
+        self::assertSame('run-42', $state->runId, 'the shared state carries the run being ticked');
+    }
+
     public function testRunsEveryStageInOrderExactlyOneUnitPerTickThenCompletes(): void
     {
         $stages = $this->allStagesFinishingInOneUnit();

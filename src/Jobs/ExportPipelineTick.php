@@ -159,6 +159,9 @@ final class ExportPipelineTick implements BoundTick
     private function hydrateState(ExportRun $run): void
     {
         $state = $this->context->state;
+        // Stamp the run scope first: every stage scopes its queue calls to
+        // $state->runId, so it must be set before any stage unit runs.
+        $state->runId = $run->runId;
         $state->probe = $run->probe;
         $state->setup = $run->setup;
         $state->discover = $run->discover;

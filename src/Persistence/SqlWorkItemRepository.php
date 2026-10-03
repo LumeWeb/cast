@@ -12,108 +12,105 @@ use LumeWeb\Cast\Export\WorkItemRepository;
 use LumeWeb\Cast\Export\WorkItemStatus;
 
 /**
- * Durable SQL-backed {@see WorkItemRepository} over the shared
- * `cast_export_items` table.
+ * Durable, MariaDB-backed WorkItemRepository. Every operation is scoped to
+ * the run id that owns the work: rows of one run are invisible to every other
+ * run, and the table's unique key is (run_id, url_hash), so the same URL is a
+ * distinct row in each run.
  *
- * The table (`{prefix}cast_export_items`, see {@see CastExportItemsTable})
- * gives the crawler what the in-memory fake cannot: a URL-hash unique index,
- * integer retry_at gating, and atomic conditional claims so a single queue
- * feeds capture from many WP-Cron requests. The insert semantics mirror the
- * in-memory contract exactly — first successful item wins forever, and a lower
- * numeric priority may replace the stored priority without resetting status —
- * while {@see claimNext()} claims with a conditional `UPDATE` guarded by
- * `status = 'queued'`, so a racing worker cannot double-claim a row.
+ * Claims are lease-based: the two-step "peek then conditional UPDATE"
+ * pattern makes a claim atomic on a single shared table. The peek (SELECT
+ * url_hash ... ORDER BY priority ASC, id ASC LIMIT 1) picks the lowest
+ * numeric priority row that is queued with a due retry, or in flight on an
+ * expired lease; the conditional UPDATE matches (run_id, url_hash, expected
+ * status, retry gate, lease gate) so a row whose state changed between the
+ * two statements affects zero rows and the claim is simply empty; two
+ * workers can never claim the same row. The UPDATE records the claiming worker token
+ * and the lease expiry, and advances the attempt counter in the same atomic
+ * statement (fetch_attempts = fetch_attempts + 1), so a crashed worker's
+ * in-flight row is reclaimable once its lease lapses; a live lease is
+ * never stolen.
  *
- * All SQL goes through the injected {@see WpDbGateway} adapter with bound
- * placeholders; the table identifier is embedded at construction from a trusted
- * name (never user input), exactly like wpdb requires.
+ * wpdb notes that shape this SQL:
+ *  - The items table is BIGINT UNSIGNED and uses the site collation, so all
+ *    timestamps are Unix seconds (BIGINT), never DATETIME: portable across
+ *    collations and trivially comparable in WHERE clauses.
+ *  - %d placeholders for ints, %s for strings; prepare() returns the
+ *    substituted SQL string, and query()/getVar()/getRow() take that string.
+ *  - MariaDB reports CHANGED rows, not matched rows: an UPDATE whose WHERE
+ *    matched a row but whose values were all identical returns 0. The
+ *    repository disambiguates "unchanged-but-present" from "unknown hash"
+ *    with a follow-up existence check after a 0-affected transition.
+ *
+ * The repository is constructed with the concrete (already-prefixed) table
+ * name and the shared WpDbGateway, the connection-scoped access point to
+ * $wpdb the whole plugin uses.
  */
 final class SqlWorkItemRepository implements WorkItemRepository
 {
-    // Statement templates; {table} is substituted at query time, the %s / %d
-    // placeholders map 1:1 to the bound params passed to the gateway.
-    private const INSERT = 'INSERT INTO {table} (url_hash, url, identity, path, kind, priority, status, fetch_attempts, retry_at) VALUES (%s, %s, %s, %s, %s, %d, %s, %d, %d)';
-    private const SELECT_PRIORITY = 'SELECT priority FROM {table} WHERE url_hash = %s';
-    private const SELECT_ATTEMPTS = 'SELECT fetch_attempts FROM {table} WHERE url_hash = %s';
-    private const SELECT_COUNT_STATUS = 'SELECT COUNT(*) FROM {table} WHERE status = %s';
-    private const SELECT_COUNT_PENDING = 'SELECT COUNT(*) FROM {table} WHERE status IN (%s, %s)';
-    private const SELECT_ROW = 'SELECT url_hash, url, identity, path, kind, priority, status, fetch_attempts, retry_at FROM {table} WHERE url_hash = %s';
-    private const SELECT_CLAIM = "SELECT url_hash FROM {table} WHERE status = %s AND retry_at <= %d ORDER BY priority ASC, id ASC LIMIT 1";
-    private const UPDATE_PRIORITY = 'UPDATE {table} SET priority = %d WHERE url_hash = %s';
-    private const UPDATE_TRANSITION = 'UPDATE {table} SET status = %s WHERE url_hash = %s';
-    private const UPDATE_RETRY = 'UPDATE {table} SET status = %s, retry_at = %d WHERE url_hash = %s';
-    private const UPDATE_CLAIM = "UPDATE {table} SET status = %s, fetch_attempts = fetch_attempts + 1 WHERE url_hash = %s AND status = %s";
-    private const DELETE_ALL = 'DELETE FROM {table}';
-    private const SELECT_FIRST_REWRITABLE = "SELECT url_hash, url, identity, path, kind, priority, status, fetch_attempts, retry_at FROM {table} WHERE status = %s AND (kind IN (%s, %s, %s) OR (kind = %s AND LOWER(SUBSTRING_INDEX(path, '.', -1)) IN (%s, %s, %s, %s, %s, %s, %s))) ORDER BY priority ASC, id ASC LIMIT 1";
-
     /**
-     * Bound values for {@see self::SELECT_FIRST_REWRITABLE}: the claim status
-     * first, then the rewritable kinds plus the text-capable asset extensions,
-     * kept in step with {@see \LumeWeb\Cast\Export\InMemoryWorkItemRepository}.
-     * The statement's first placeholder is the status guard (`WHERE status =
-     * %s`), so the `done` status must lead the rest of the bound values.
+     * @param \Closure(): int $clock Returns the current Unix time (seconds).
      */
-    private const REWRITABLE = ['done', 'page', 'redirect', 'text', 'asset', 'css', 'js', 'mjs', 'json', 'xml', 'rss', 'atom'];
-
-    /**
-     * How many claim candidates may be stolen by a racing worker before the
-     * caller gives up this tick; a bounded retry to stay alive under load.
-     */
-    private const CLAIM_RETRIES = 5;
-
-    /**
-     * @var \Closure(): int
-     */
-    private readonly \Closure $clock;
-
     public function __construct(
         private readonly WpDbGateway $db,
         private readonly string $table,
         ?\Closure $clock = null,
     ) {
-        $this->clock = $clock ?? static fn (): int => time();
+        $this->clock = $clock ?? static fn(): int => time();
     }
 
-    public function insertCanonical(WorkItem $workItem, int $priority = 10): InsertOutcome
+    /**
+     * @var \Closure(): int
+     */
+    private \Closure $clock;
+
+    public function insertCanonical(string $runId, WorkItem $workItem, int $priority = 10): InsertOutcome
     {
-        if ($priority < 0) {
-            $priority = 0;
-        }
-
         $hash = $workItem->urlHash();
-        $row = $this->row($hash);
 
-        if ($row === null) {
-            $affected = $this->db->query($this->sql(self::INSERT), [
-                $hash,
-                (string) $workItem->url(),
-                $workItem->identity(),
-                $workItem->outputPath(),
-                $workItem->kind()->value,
-                $priority,
-                WorkItemStatus::Queued->value,
-                0,
-                0,
-            ]);
+        $existing = $this->db->getVar(
+            $this->sql("SELECT status FROM {$this->table} WHERE run_id = %s AND url_hash = %s"),
+            [$runId, $hash],
+        );
 
-            if ($affected === 1) {
-                return InsertOutcome::created();
-            }
+        if ($existing === null) {
+            $inserted = $this->db->query(
+                $this->sql("INSERT INTO {$this->table}
+                    (run_id, url_hash, url, identity, path, kind, priority, status, fetch_attempts, retry_at, worker_token, lease_expires_at)
+                 VALUES (%s, %s, %s, %s, %s, %s, %d, %s, %d, %d, %s, %d)"),
+                [
+                    $runId,
+                    $hash,
+                    (string) $workItem->url(),
+                    $workItem->identity(),
+                    $workItem->outputPath(),
+                    $workItem->kind()->value,
+                    $priority,
+                    WorkItemStatus::Queued->value,
+                    0,
+                    0,
+                    '',
+                    0,
+                ],
+            );
 
-            // A racing writer inserted the same url_hash between our read and
-            // write; re-read and apply the duplicate rules below.
-            $row = $this->row($hash);
-            if ($row === null) {
-                return InsertOutcome::duplicate();
-            }
+            return $inserted === 1 ? InsertOutcome::created() : InsertOutcome::duplicate();
         }
 
-        if ($row['status'] === WorkItemStatus::Done->value) {
+        // Row present in this run: first-seen-wins semantics.
+        if ($existing === WorkItemStatus::Done->value) {
             return InsertOutcome::duplicate();
         }
 
-        if ($priority < (int) $row['priority']) {
-            $this->db->query($this->sql(self::UPDATE_PRIORITY), [$priority, $hash]);
+        $priorityRow = $this->db->getRow(
+            $this->sql("SELECT priority FROM {$this->table} WHERE run_id = %s AND url_hash = %s"),
+            [$runId, $hash],
+        );
+        $storedPriority = $priorityRow === null ? null : (int) $priorityRow['priority'];
+        if ($storedPriority !== null && $priority < $storedPriority) {
+            $this->db->query(
+                $this->sql("UPDATE {$this->table} SET priority = %d WHERE run_id = %s AND url_hash = %s"),
+                [$priority, $runId, $hash],
+            );
 
             return InsertOutcome::priorityReplaced();
         }
@@ -121,142 +118,204 @@ final class SqlWorkItemRepository implements WorkItemRepository
         return InsertOutcome::duplicate();
     }
 
-    public function priorityOf(string $urlHash): ?int
+    public function priorityOf(string $runId, string $urlHash): ?int
     {
-        $priority = $this->db->getVar($this->sql(self::SELECT_PRIORITY), [$urlHash]);
+        $value = $this->db->getVar(
+            $this->sql("SELECT priority FROM {$this->table} WHERE run_id = %s AND url_hash = %s"),
+            [$runId, $urlHash],
+        );
 
-        return $priority === null ? null : (int) $priority;
+        return $value === null ? null : (int) $value;
     }
 
-    public function countByStatus(WorkItemStatus $status): int
+    public function countByStatus(string $runId, WorkItemStatus $status): int
     {
-        return (int) $this->db->getVar($this->sql(self::SELECT_COUNT_STATUS), [$status->value]);
+        $count = $this->db->getVar(
+            $this->sql("SELECT COUNT(*) FROM {$this->table} WHERE run_id = %s AND status = %s"),
+            [$runId, $status->value],
+        );
+
+        return (int) $count;
     }
 
-    public function pendingCount(): int
+    public function pendingCount(string $runId): int
     {
-        return (int) $this->db->getVar($this->sql(self::SELECT_COUNT_PENDING), [
-            WorkItemStatus::Queued->value,
-            WorkItemStatus::Processing->value,
-        ]);
+        $count = $this->db->getVar(
+            $this->sql("SELECT COUNT(*) FROM {$this->table} WHERE run_id = %s AND status IN ('queued', 'processing')"),
+            [$runId],
+        );
+
+        return (int) $count;
     }
 
-    public function hasPending(): bool
+    public function hasPending(string $runId): bool
     {
-        return $this->pendingCount() > 0;
+        return $this->pendingCount($runId) > 0;
     }
 
-    /**
-     * Returns true when the item exists — its status is now the requested
-     * status — and false only when the hash is unknown.
-     *
-     * MariaDB reports 0 affected rows when an UPDATE sets a value equal to the
-     * stored one, so a same-status transition would otherwise look like a
-     * miss; the existence re-check disambiguates the unchanged-but-present
-     * case from an unknown hash.
-     */
-    public function transition(string $urlHash, WorkItemStatus $status): bool
+    public function transition(string $runId, string $urlHash, WorkItemStatus $status): bool
     {
-        $affected = $this->db->query($this->sql(self::UPDATE_TRANSITION), [$status->value, $urlHash]);
+        $updated = $this->db->query(
+            $this->sql("UPDATE {$this->table}
+                SET status = %s, worker_token = '', lease_expires_at = 0
+                WHERE run_id = %s AND url_hash = %s"),
+            [$status->value, $runId, $urlHash],
+        );
 
-        return $affected === 1 || $this->row($urlHash) !== null;
-    }
-
-    public function claimNext(): ?WorkItem
-    {
-        $now = ($this->clock)();
-
-        for ($attempt = 0; $attempt < self::CLAIM_RETRIES; ++$attempt) {
-            $candidate = $this->db->getVar($this->sql(self::SELECT_CLAIM), [
-                WorkItemStatus::Queued->value,
-                $now,
-            ]);
-            if ($candidate === null) {
-                return null;
-            }
-
-            $hash = (string) $candidate;
-
-            // Exclusive claim: only the worker whose UPDATE still sees the row
-            // as queued increments attempts and takes processing.
-            $affected = $this->db->query($this->sql(self::UPDATE_CLAIM), [
-                WorkItemStatus::Processing->value,
-                $hash,
-                WorkItemStatus::Queued->value,
-            ]);
-            if ($affected !== 1) {
-                continue;
-            }
-
-            $row = $this->row($hash);
-            if ($row === null) {
-                // The claim succeeded but the row vanished (e.g. a hard delete
-                // from another worker); treat it like a lost race and retry.
-                continue;
-            }
-
-            return $this->hydrate($row);
+        if ($updated > 0) {
+            return true;
         }
 
-        return null;
+        // MariaDB reports changed rows, not matched rows: a transition that
+        // sets the status, worker token and lease to their stored values
+        // affects 0 rows even though the row exists. Re-check existence to
+        // disambigate unchanged-but-present (true) from an unknown hash
+        // (false).
+        return $this->rowExists($runId, $urlHash);
     }
 
-    public function attemptCountOf(string $urlHash): int
+    public function claimNext(string $runId, string $worker = WorkItemRepository::DEFAULT_WORKER, int $leaseSeconds = WorkItemRepository::DEFAULT_LEASE_SECONDS): ?WorkItem
     {
-        $attempts = $this->db->getVar($this->sql(self::SELECT_ATTEMPTS), [$urlHash]);
+        $now = ($this->clock)();
+        $leaseExpiresAt = $now + max(0, $leaseSeconds);
+        $queued = WorkItemStatus::Queued->value;
+        $processing = WorkItemStatus::Processing->value;
 
-        return $attempts === null ? 0 : (int) $attempts;
-    }
+        // Peek: the lowest-priority claimable row of this run; id is the
+        // tiebreaker, so ordering is deterministic.
+        $hash = $this->db->getVar(
+            $this->sql("SELECT url_hash FROM {$this->table}
+                WHERE run_id = %s
+                  AND (
+                        (status = %s AND retry_at <= %d)
+                        OR (status = %s AND lease_expires_at > 0 AND lease_expires_at <= %d)
+                      )
+                ORDER BY priority ASC, id ASC
+                LIMIT 1"),
+            [$runId, $queued, $now, $processing, $now],
+        );
 
-    /**
-     * Returns true when the item exists — the row is re-queued with the new
-     * retry time — and false only when the hash is unknown.
-     *
-     * The same idempotency nuance as {@see self::transition()} applies: MariaDB
-     * reports 0 affected rows when the re-queued status and retry time already
-     * match the stored values, so the existence re-check disambiguates that
-     * unchanged-but-present case from an unknown hash.
-     */
-    public function scheduleRetry(string $urlHash, int $delaySeconds): bool
-    {
-        $retryAt = ($this->clock)() + max(0, $delaySeconds);
+        if ($hash === null) {
+            return null;
+        }
 
-        $affected = $this->db->query($this->sql(self::UPDATE_RETRY), [
-            WorkItemStatus::Queued->value,
-            $retryAt,
-            $urlHash,
-        ]);
+        // Claim: the conditional UPDATE matches the exact state the peek saw,
+        // so a row whose state changed in between affects zero rows and the
+        // claim is empty. It records the worker token, the lease expiry and
+        // the attempt count in one atomic statement.
+        $claimed = $this->db->query(
+            $this->sql("UPDATE {$this->table}
+                SET status = %s,
+                    worker_token = %s,
+                    lease_expires_at = %d,
+                    fetch_attempts = fetch_attempts + 1
+                WHERE run_id = %s AND url_hash = %s
+                  AND (
+                        (status = %s AND retry_at <= %d)
+                        OR (status = %s AND lease_expires_at > 0 AND lease_expires_at <= %d)
+                      )"),
+            [
+                $processing,
+                $worker,
+                $leaseExpiresAt,
+                $runId,
+                $hash,
+                $queued,
+                $now,
+                $processing,
+                $now,
+            ],
+        );
 
-        return $affected === 1 || $this->row($urlHash) !== null;
-    }
+        if ($claimed !== 1) {
+            return null;
+        }
 
-    public function claimNextRewritable(): ?WorkItem
-    {
-        $row = $this->db->getRow($this->sql(self::SELECT_FIRST_REWRITABLE), self::REWRITABLE);
+        $row = $this->db->getRow(
+            $this->sql("SELECT url_hash, url, identity, path, kind, priority FROM {$this->table} WHERE run_id = %s AND url_hash = %s"),
+            [$runId, $hash],
+        );
 
         return $row === null ? null : $this->hydrate($row);
     }
 
-    /**
-     * Remove every row from the queue so a brand-new run starts from an empty
-     * table. The queue is per-run scratch space: the next run's discovery
-     * refills it, and the prior run's terminal rows (`done`/`rewritten`) must
-     * not survive — insertCanonical is first-seen-wins and never re-queues a
-     * finished row, so a stale row would starve the fresh per-run work directory.
-     * The DELETE is a native prepared statement over the trusted table
-     * identifier, exactly like every other query in this repository.
-     */
-    public function clear(): void
+    public function attemptCountOf(string $runId, string $urlHash): int
     {
-        $this->db->query($this->sql(self::DELETE_ALL));
+        $count = $this->db->getVar(
+            $this->sql("SELECT fetch_attempts FROM {$this->table} WHERE run_id = %s AND url_hash = %s"),
+            [$runId, $urlHash],
+        );
+
+        return $count === null ? 0 : (int) $count;
     }
 
-    /**
-     * @return array<string, mixed>|null
-     */
-    private function row(string $urlHash): ?array
+    public function scheduleRetry(string $runId, string $urlHash, int $delaySeconds): bool
     {
-        return $this->db->getRow($this->sql(self::SELECT_ROW), [$urlHash]);
+        $retryAt = ($this->clock)() + max(0, $delaySeconds);
+
+        $this->db->query(
+            $this->sql("UPDATE {$this->table}
+                SET status = %s, retry_at = %d, worker_token = '', lease_expires_at = 0
+                WHERE run_id = %s AND url_hash = %s"),
+            [WorkItemStatus::Queued->value, $retryAt, $runId, $urlHash],
+        );
+
+        // Changed-row semantics: 0 affected also means the row already had
+        // this exact state and is still queued for retry. Existence is the
+        // contract.
+        return $this->rowExists($runId, $urlHash);
+    }
+
+    public function claimNextRewritable(string $runId): ?WorkItem
+    {
+        $row = $this->db->getRow(
+            $this->sql("SELECT url_hash, url, identity, path, kind, priority FROM {$this->table}
+                WHERE run_id = %s
+                  AND status = %s
+                  AND (kind IN ('page', 'redirect', 'text')
+                       OR (kind = 'asset' AND path LIKE %s ESCAPE '\\\\')
+                       OR (kind = 'asset' AND path LIKE %s ESCAPE '\\\\')
+                       OR (kind = 'asset' AND path LIKE %s ESCAPE '\\\\')
+                       OR (kind = 'asset' AND path LIKE %s ESCAPE '\\\\')
+                       OR (kind = 'asset' AND path LIKE %s ESCAPE '\\\\')
+                       OR (kind = 'asset' AND path LIKE %s ESCAPE '\\\\')
+                       OR (kind = 'asset' AND path LIKE %s ESCAPE '\\\\'))
+                ORDER BY priority ASC, id ASC
+                LIMIT 1"),
+            [
+                $runId,
+                WorkItemStatus::Done->value,
+                '%.css',
+                '%.js',
+                '%.mjs',
+                '%.json',
+                '%.xml',
+                '%.rss',
+                '%.atom',
+            ],
+        );
+
+        return $row === null ? null : $this->hydrate($row);
+    }
+
+    public function clear(string $runId): void
+    {
+        // The cleared run's terminal rows must not survive: first-seen-wins
+        // would starve the fresh per-run work directory with stale rows.
+        $this->db->query(
+            $this->sql("DELETE FROM {$this->table} WHERE run_id = %s"),
+            [$runId],
+        );
+    }
+
+    private function rowExists(string $runId, string $urlHash): bool
+    {
+        $exists = $this->db->getVar(
+            $this->sql("SELECT url_hash FROM {$this->table} WHERE run_id = %s AND url_hash = %s"),
+            [$runId, $urlHash],
+        );
+
+        return $exists !== null;
     }
 
     /**
@@ -292,14 +351,8 @@ final class SqlWorkItemRepository implements WorkItemRepository
         );
     }
 
-    /**
-     * Substitute the trusted table identifier into a statement template. The
-     * identifier is embedded here, never bound, exactly like wpdb requires;
-     * the %s / %d parameter placeholders are left intact for the gateway to
-     * bind.
-     */
-    private function sql(string $template): string
+    private function sql(string $sql): string
     {
-        return str_replace('{table}', $this->table, $template);
+        return $sql;
     }
 }

@@ -37,6 +37,7 @@ final class CastExportItemsTableTest extends TestCase
     {
         $sql = CastExportItemsTable::createSql('wptests_cast_export_items', '');
 
+        self::assertStringContainsString('run_id VARCHAR(64) NOT NULL', $sql);
         self::assertStringContainsString('url_hash CHAR(32) NOT NULL', $sql);
         self::assertStringContainsString('url TEXT NOT NULL', $sql);
         self::assertStringContainsString('identity TEXT NOT NULL', $sql);
@@ -46,6 +47,8 @@ final class CastExportItemsTableTest extends TestCase
         self::assertStringContainsString("status VARCHAR(20) NOT NULL DEFAULT 'queued'", $sql);
         self::assertStringContainsString('fetch_attempts TINYINT NOT NULL DEFAULT 0', $sql);
         self::assertStringContainsString('retry_at BIGINT NOT NULL DEFAULT 0', $sql);
+        self::assertStringContainsString("worker_token VARCHAR(64) NOT NULL DEFAULT ''", $sql);
+        self::assertStringContainsString('lease_expires_at BIGINT NOT NULL DEFAULT 0', $sql);
     }
 
     public function testCreateSqlDeclaresPrimaryAndUniqueKeys(): void
@@ -53,7 +56,10 @@ final class CastExportItemsTableTest extends TestCase
         $sql = CastExportItemsTable::createSql('wptests_cast_export_items', '');
 
         self::assertStringContainsString('PRIMARY KEY  (id)', $sql);
-        self::assertStringContainsString('UNIQUE KEY url_hash (url_hash)', $sql);
+        // The unique key is per run: the same URL may legally exist in two
+        // runs at once (first-seen-wins is a per-run guarantee), so the
+        // legacy url_hash-only unique key is gone.
+        self::assertStringContainsString('UNIQUE KEY run_url_hash (run_id, url_hash)', $sql);
     }
 
     public function testCreateSqlAppendsTheRequestedCharsetCollate(): void

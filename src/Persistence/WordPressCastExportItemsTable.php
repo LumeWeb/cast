@@ -86,4 +86,37 @@ final class WordPressCastExportItemsTable
             $this->db()->query($sql);
         }
     }
+
+    /**
+     * Migrate a pre run-scoping queue table: swap the legacy url_hash-only
+     * unique key for (run_id, url_hash); dbDelta cannot replace an existing
+     * key, so this step has to. Idempotent: no table, or the run-scoped key
+     * already in place, is a no-op.
+     */
+    public function migrateRunScope(): void
+    {
+        $db = $this->db();
+        $table = CastExportItemsTable::name($db->prefix);
+
+        // The SHOW query is built from the (internally derived, quoted) table
+        // name and passed to prepare() as a single literal, so the LIKE
+        // pattern is a safe constant.
+        $exists = $db->get_var($db->prepare('SHOW TABLES LIKE %s', $db->esc_like($table)));
+        if ($exists === null) {
+            return;
+        }
+
+        // A row back means the legacy url_hash-only unique key is still in
+        // place; null means the table is already run-scoped.
+        $legacyKey = $db->get_row($db->prepare(
+            'SHOW INDEX FROM %i WHERE Key_name = %s',
+            $table,
+            CastExportItemsTable::LEGACY_UNIQUE_KEY,
+        ));
+        if ($legacyKey === null) {
+            return;
+        }
+
+        $this->db()->query(CastExportItemsTable::runScopeKeySql($table));
+    }
 }
