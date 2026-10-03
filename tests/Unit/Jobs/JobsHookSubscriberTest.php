@@ -396,6 +396,29 @@ final class JobsHookSubscriberTest extends TestCase
         self::assertSame(1000 + 60, $this->scheduler->nextAt(ContentPublishScheduler::AUTO_HOOK));
     }
 
+    public function testBatchedUnitsSeeAdvancingClockAndRearmUsesCapturedTickStart(): void
+    {
+        // Production regression: the subscriber used to pass the tick-start
+        // instant into the runner, pinning every unit of the batch to that
+        // frozen timestamp. Each unit must observe the current wall-clock
+        // instant as the batch progresses, and the rearm must stay anchored
+        // to the instant captured when the tick started — not to the clock
+        // after the batch has run.
+        $this->storePendingDirtyRun('run-1');
+        $instants = [];
+        $this->tick->mutate = function (ExportRun $run) use (&$instants): void {
+            $instants[] = $this->tick->lastNow;
+            $this->clock->advance(1);
+        };
+
+        $this->subscriber->runTick();
+
+        // Successive units of the batch receive advancing instants…
+        self::assertSame([1000, 1001, 1002], array_slice($instants, 0, 3));
+        // …and the rearm is still based on the captured tick-start (1000 + 2s).
+        self::assertSame(1000 + 2, $this->scheduler->nextAt(ContentPublishScheduler::AUTO_HOOK));
+    }
+
     public function testDeferredTickRearmsAtTheSlowCadence(): void
     {
         // A pending dirty queued run parked on a missing identity → Deferred.
