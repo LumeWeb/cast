@@ -26,6 +26,14 @@ final class FakeTick implements BoundTick
     public ?TickResult $result = null;
 
     /**
+     * Optional sequence of results: the next perform() call pops the head,
+     * falling back to $result (or more()) once it is empty.
+     *
+     * @var list<TickResult>
+     */
+    public array $results = [];
+
+    /**
      * @var Closure(ExportRun):void|null
      */
     public ?Closure $mutate = null;
@@ -44,6 +52,10 @@ final class FakeTick implements BoundTick
 
         if ($this->mutate !== null) {
             ($this->mutate)($run);
+        }
+
+        if ($this->results !== []) {
+            return array_shift($this->results);
         }
 
         return $this->result ?? TickResult::more();

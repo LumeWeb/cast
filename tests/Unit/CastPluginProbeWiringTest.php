@@ -12,6 +12,7 @@ use LumeWeb\Cast\Export\RunStage;
 use LumeWeb\Cast\Export\RunStatus;
 use LumeWeb\Cast\Jobs\ContentPublishScheduler;
 use LumeWeb\Cast\Jobs\PublishIdentity;
+use LumeWeb\Cast\Jobs\TickConfig;
 use LumeWeb\Cast\Jobs\WordPressActionScheduler;
 use PHPUnit\Framework\TestCase;
 
@@ -142,9 +143,26 @@ final class CastPluginProbeWiringTest extends TestCase
         @rmdir($path);
     }
 
+    /**
+     * Boot the plugin with the tick runner pinned to ONE pipeline unit per
+     * tick — the historical behaviour these per-stage wiring assertions are
+     * choreographed against ("one row per tick", one boundary per tick). The
+     * production default now batches (time budget + item hard cap), which
+     * would cross several stage boundaries inside a single tick and defeat
+     * the per-stage coverage here.
+     */
+    private function bootSingleUnitPerTick(): void
+    {
+        CastPlugin::boot(
+            '/plugins/cast/cast.php',
+            null,
+            new TickConfig(reclaimStaleLocks: true, unitsPerTick: 1),
+        );
+    }
+
     public function testBootedProbeRunsRecordsStateAndReachesTheSetupBoundary(): void
     {
-        CastPlugin::boot('/plugins/cast/cast.php');
+        $this->bootSingleUnitPerTick();
 
         $this->runTick();
 
@@ -184,7 +202,7 @@ final class CastPluginProbeWiringTest extends TestCase
         $_SERVER['HTTP_AUTHORIZATION'] = 'Basic ' . base64_encode('alice:s3cret');
         $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] = 'Basic ' . base64_encode('alice:s3cret');
 
-        CastPlugin::boot('/plugins/cast/cast.php');
+        $this->bootSingleUnitPerTick();
 
         $this->runTick();
 
@@ -217,7 +235,7 @@ final class CastPluginProbeWiringTest extends TestCase
 
     public function testBootedSetupRunsCreatesJailedWorkDirAndAdvancesToDiscoverBoundary(): void
     {
-        CastPlugin::boot('/plugins/cast/cast.php');
+        $this->bootSingleUnitPerTick();
 
         $this->runTick();
         $this->runTick();
@@ -256,7 +274,7 @@ final class CastPluginProbeWiringTest extends TestCase
             'filename' => null,
         ];
 
-        CastPlugin::boot('/plugins/cast/cast.php');
+        $this->bootSingleUnitPerTick();
 
         // probe + setup + six seeders + one (empty) keyset page + one sitemap
         // document = ten bounded units to drain discovery.
@@ -327,7 +345,7 @@ final class CastPluginProbeWiringTest extends TestCase
             'filename' => null,
         ];
 
-        CastPlugin::boot('/plugins/cast/cast.php');
+        $this->bootSingleUnitPerTick();
 
         // The whole real pipeline through capture: probe + setup + six seeders
         // + an empty keyset page + one sitemap document drain discovery across
@@ -408,7 +426,7 @@ final class CastPluginProbeWiringTest extends TestCase
             'filename' => null,
         ];
 
-        CastPlugin::boot('/plugins/cast/cast.php');
+        $this->bootSingleUnitPerTick();
 
         // The whole real pipeline through rewrite: probe + setup + six seeders
         // + an empty keyset page + one sitemap document drain discovery across
@@ -509,7 +527,7 @@ final class CastPluginProbeWiringTest extends TestCase
             'filename' => null,
         ];
 
-        CastPlugin::boot('/plugins/cast/cast.php');
+        $this->bootSingleUnitPerTick();
 
         // The whole real pipeline through rewrite AND its reconciliation:
         // probe + setup + six seeders + an empty keyset page + one sitemap
@@ -614,7 +632,7 @@ final class CastPluginProbeWiringTest extends TestCase
             'filename' => null,
         ];
 
-        CastPlugin::boot('/plugins/cast/cast.php');
+        $this->bootSingleUnitPerTick();
 
         // The whole real pipeline through pack: probe + setup + six seeders +
         // an empty keyset page + one sitemap document drain discovery across
@@ -714,7 +732,7 @@ final class CastPluginProbeWiringTest extends TestCase
             'filename' => null,
         ];
 
-        CastPlugin::boot('/plugins/cast/cast.php');
+        $this->bootSingleUnitPerTick();
 
         // The whole real pipeline through wrap-up: probe + setup + six seeders
         // + an empty keyset page + one sitemap document drain discovery across
@@ -803,7 +821,7 @@ final class CastPluginProbeWiringTest extends TestCase
      */
     public function testBootedTickRearmsExactlyOneNextAutoTick(): void
     {
-        CastPlugin::boot('/plugins/cast/cast.php');
+        $this->bootSingleUnitPerTick();
 
         $before = time();
 
@@ -836,7 +854,7 @@ final class CastPluginProbeWiringTest extends TestCase
      */
     public function testBootedConsecutiveTicksDoNotStackDuplicateAutoTicks(): void
     {
-        CastPlugin::boot('/plugins/cast/cast.php');
+        $this->bootSingleUnitPerTick();
 
         $this->runTick();
         $first = $GLOBALS['lumeweb_cast_actions']['actions'];

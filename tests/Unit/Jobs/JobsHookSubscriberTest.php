@@ -146,7 +146,9 @@ final class JobsHookSubscriberTest extends TestCase
 
         $this->subscriber->runTick();
 
-        self::assertSame(1, $this->tick->calls);
+        // Default TickConfig batches up to the item hard cap (fast FakeTick
+        // units, frozen clock: the time budget never elapses).
+        self::assertSame(TickConfig::DEFAULT_UNITS_PER_TICK, $this->tick->calls);
         self::assertSame('run-1', $this->tick->lastRunId);
         self::assertFalse($this->lock->isHeld(self::LOCK_KEY));
     }
