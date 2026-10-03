@@ -44,17 +44,15 @@ final class CaptureStage implements PipelineStage
             return StageResult::fail('Capture requires a successful setup first.');
         }
 
-        $item = $this->repository->claimNext();
+        $item = $this->repository->claimNext($this->state->runId);
         if ($item === null) {
-            // Nothing is claimable. At the fixed point the whole queue has
-            // drained (nothing queued, in flight, or waiting on a retry), so
-            // the terminal summary is final and the stage is done; otherwise
-            // a scheduled retry is simply not due yet and we wait one tick.
-            if ($this->repository->pendingCount() === 0) {
+            // null here means the fixed point (pendingCount 0, terminal
+            // summary final) or a scheduled retry that is not due yet.
+            if ($this->repository->pendingCount($this->state->runId) === 0) {
                 $this->state->capture = new CaptureSummary(
-                    $this->repository->countByStatus(WorkItemStatus::Done),
-                    $this->repository->countByStatus(WorkItemStatus::Failed),
-                    $this->repository->countByStatus(WorkItemStatus::Skipped),
+                    $this->repository->countByStatus($this->state->runId, WorkItemStatus::Done),
+                    $this->repository->countByStatus($this->state->runId, WorkItemStatus::Failed),
+                    $this->repository->countByStatus($this->state->runId, WorkItemStatus::Skipped),
                 );
 
                 return StageResult::done('', 0);
@@ -67,7 +65,7 @@ final class CaptureStage implements PipelineStage
             ->captureService($origin, $workDir)
             ->capture($item);
 
-        $this->outcomeApplier->apply($this->repository, $item, $result);
+        $this->outcomeApplier->apply($this->state->runId, $this->repository, $item, $result);
 
         return StageResult::more('', 1);
     }

@@ -7,6 +7,8 @@ namespace LumeWeb\Cast\Tests\Unit\Jobs;
 use LumeWeb\Cast\Export\ExportRun;
 use LumeWeb\Cast\Export\InMemoryRunRepository;
 use LumeWeb\Cast\Export\InMemoryWorkItemRepository;
+use LumeWeb\Cast\Export\PackResult;
+use LumeWeb\Cast\Export\PackStatus;
 use LumeWeb\Cast\Export\RunSettings;
 use LumeWeb\Cast\Export\RunStatus;
 use LumeWeb\Cast\Export\WorkItemFactory;
@@ -353,53 +355,178 @@ final class ContentPublishSchedulerTest extends TestCase
     {
         $workItems = new InMemoryWorkItemRepository();
         $service = $this->makeService(workItems: $workItems);
-        $workItems->insertCanonical((new WorkItemFactory())->fromString('https://example.com/stale/'));
+        // The first run created at t=1000 gets the deterministic id
+        // run-1000-1: seed that NEW run's queue slice with a stale row so the
+        // test observes the creation clearing it.
+        $workItems->insertCanonical('run-1000-1', (new WorkItemFactory())->fromString('https://example.com/stale/'));
 
-        // Creating the first run must empty the queue: the fresh per-run work
-        // directory must never inherit the prior run's terminal rows.
+        // Creating the first run must empty the new run's queue slice: the
+        // fresh per-run work directory must never inherit stale terminal rows.
         $service->onContentPublished(at: 1000);
-        self::assertSame(0, $workItems->pendingCount(), 'a new run starts from a clean queue');
+        $runId = $this->repository->latest()?->runId;
+        self::assertNotNull($runId);
+        self::assertSame(0, $workItems->pendingCount($runId), 'a new run starts from a clean queue');
 
         // Subsequent content events only absorb the still queued run — they
         // must NOT clear again, or work already queued for the current run
         // would be dropped (clear once per new run id, never per event/tick).
-        $workItems->insertCanonical((new WorkItemFactory())->fromString('https://example.com/current/'));
+        $workItems->insertCanonical($runId, (new WorkItemFactory())->fromString('https://example.com/current/'));
         $service->onContentPublished(at: 1010);
-        self::assertSame(1, $workItems->pendingCount(), 'an absorbed run never clears the queue');
+        self::assertSame(1, $workItems->pendingCount($runId), 'an absorbed run never clears the queue');
 
         // A plain status/repository read is never a run creation and never
         // clears either.
         $seen = $this->repository->latest();
         self::assertNotNull($seen);
-        self::assertSame(1, $workItems->pendingCount());
+        self::assertSame(1, $workItems->pendingCount($runId));
     }
 
     public function testContentAfterTerminalRunClearsTheQueueSoRunTwoRedisCoversRoot(): void
     {
-        // Run 1 completes, leaving the root page rewritten in the shared queue
-        // (the live starvation shape: first-seen-wins would never re-queue a
-        // finished row, so the fresh per-run workdir is starved of the root
-        // index.html and pack fails).
+        // Run 1 completes, leaving the root page rewritten in run 1's slice of
+        // the shared queue. Run 2 is a brand-new run id with its own queue
+        // slice, cleared at creation: its discovery re-enqueues `/` into its
+        // OWN slice instead of deduping it into a finished row.
         $workItems = new InMemoryWorkItemRepository();
         $service = $this->makeService(workItems: $workItems);
         $root = (new WorkItemFactory())->fromString('https://example.com/');
-        self::assertTrue($workItems->insertCanonical($root)->inserted());
-        $workItems->transition($root->urlHash(), WorkItemStatus::Done);
-        $workItems->transition($root->urlHash(), WorkItemStatus::Rewritten);
+        self::assertTrue($workItems->insertCanonical('run-1', $root)->inserted());
+        $workItems->transition('run-1', $root->urlHash(), WorkItemStatus::Done);
+        $workItems->transition('run-1', $root->urlHash(), WorkItemStatus::Rewritten);
 
         $run = $this->makeRun('run-1', 800);
         $run->start(at: 800);
         $run->complete(at: 900);
         $this->repository->save($run);
 
-        // Run 2 is created: the scheduler must empty the queue up front so the
-        // next discovery re-enqueues `/` instead of deduping it into oblivion.
+        // Run 2 is created: the scheduler clears the NEW run's own slice up
+        // front so the next discovery starts from a clean per-run queue.
         $service->onContentPublished(at: 1000);
 
-        $outcome = $workItems->insertCanonical($root, 1);
+        $next = $this->repository->latest();
+        self::assertNotNull($next);
+        self::assertNotSame('run-1', $next->runId);
+        $run2 = $next->runId;
+
+        $outcome = $workItems->insertCanonical($run2, $root, 1);
         self::assertTrue($outcome->inserted(), 'run 2 must re-discover and re-queue the root page');
-        self::assertSame(0, $workItems->countByStatus(WorkItemStatus::Rewritten));
-        self::assertSame(1, $workItems->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(1, $workItems->countByStatus($run2, WorkItemStatus::Queued));
+        // Run 1 is terminal: its stale queue rows are purged when run 2 is
+        // persisted, so completed-run rows never linger in the shared queue.
+        self::assertSame(0, $workItems->countByStatus('run-1', WorkItemStatus::Rewritten));
+    }
+
+    public function testNewRunCreationPurgesTerminalAndSupersededPriorRunsQueueRows(): void
+    {
+        // Queue rows are run-scoped but survived their runs: when a new run is
+        // persisted, the queue rows of prior terminal and superseded runs must
+        // be purged, while a live (nonterminal, not superseded) run keeps its
+        // rows and the new run starts from an empty slice.
+        $workItems = new InMemoryWorkItemRepository();
+        $service = $this->makeService(workItems: $workItems);
+        $root = (new WorkItemFactory())->fromString('https://example.com/');
+
+        $done = $this->makeRun('run-terminal', 800);
+        $done->start(at: 810);
+        $done->complete(at: 900);
+        $this->repository->save($done);
+
+        $overtaken = $this->makeRun('run-superseded', 820);
+        $overtaken->start(at: 830);
+        $overtaken->supersede(at: 860);
+        $this->repository->save($overtaken);
+
+        $live = $this->makeRun('run-live', 840);
+        $live->start(at: 850);
+        $this->repository->save($live);
+
+        foreach (['run-terminal', 'run-superseded', 'run-live'] as $priorId) {
+            self::assertTrue($workItems->insertCanonical($priorId, $root)->inserted());
+        }
+        $workItems->transition('run-terminal', $root->urlHash(), WorkItemStatus::Done);
+        $workItems->transition('run-terminal', $root->urlHash(), WorkItemStatus::Rewritten);
+
+        $service->onContentPublished(at: 1000);
+
+        $next = $this->repository->latest();
+        self::assertNotNull($next);
+        $freshId = $next->runId;
+        self::assertNotSame('run-terminal', $freshId);
+        self::assertSame(0, $workItems->countByStatus('run-terminal', WorkItemStatus::Rewritten), 'a terminal prior run loses its queue rows');
+        self::assertSame(0, $workItems->countByStatus('run-superseded', WorkItemStatus::Queued), 'a superseded prior run loses its queue rows');
+        self::assertSame(1, $workItems->countByStatus('run-live', WorkItemStatus::Queued), 'a live nonterminal run keeps its queue rows');
+        self::assertSame(0, $workItems->pendingCount($freshId), 'the new run starts from an empty queue');
+    }
+
+    public function testPublishExistingReplayPurgesOnlyTheSourceRunsQueueSlice(): void
+    {
+        // publishExisting bypasses ensurePendingRun (it deletes the terminal
+        // source record itself and seeds the replay run directly), so the
+        // source run's queue slice is purged on that path — and no other
+        // run's slice is touched: no other run is purged and the brand-new
+        // seeded run is never cleared.
+        $workItems = new InMemoryWorkItemRepository();
+        $service = $this->makeService(workItems: $workItems);
+        $root = (new WorkItemFactory())->fromString('https://example.com/');
+
+        $source = $this->makeRun('run-source', 800);
+        $source->start(at: 810);
+        $source->recordPack(new PackResult(
+            PackStatus::Completed,
+            2,
+            0,
+            4321,
+            '/tmp/exports/run-source.zip',
+            '/tmp/exports/manifest.json',
+        ), at: 820);
+        $source->recordPublishIdentifiers('cid-1', 'web-1', 'ipns-1', at: 830);
+        $source->complete(at: 900);
+        $this->repository->save($source);
+
+        // A prior terminal run that is NOT the source: it is not replayed
+        // and must keep its rows — only the source's slice is purged.
+        $older = $this->makeRun('run-older', 700);
+        $older->start(at: 710);
+        $older->complete(at: 750);
+        $this->repository->save($older);
+
+        // A live running run: never touched by a publish-existing replay.
+        $live = $this->makeRun('run-live', 840);
+        $live->start(at: 850);
+        $this->repository->save($live);
+
+        foreach (['run-source', 'run-older', 'run-live'] as $runId) {
+            self::assertTrue($workItems->insertCanonical($runId, $root)->inserted());
+        }
+        $workItems->transition('run-source', $root->urlHash(), WorkItemStatus::Done);
+        $workItems->transition('run-source', $root->urlHash(), WorkItemStatus::Rewritten);
+
+        $result = $service->publishExisting($source, at: 1000);
+
+        self::assertTrue($result->started);
+        $seeded = $this->repository->latest();
+        self::assertNotNull($seeded);
+        self::assertNotSame('run-source', $seeded->runId);
+        // The seeded replay keeps its publish-only shape: a fresh NotStarted,
+        // dirty, explicitly-started run carrying the source pack and the
+        // previously recorded publish identifiers, with one immediate tick.
+        self::assertSame(RunStatus::NotStarted, $seeded->status);
+        self::assertTrue($seeded->dirty);
+        self::assertTrue($seeded->explicitStart);
+        self::assertSame(ExportRun::RESUME_PUBLISH_ONLY, $seeded->resumeCursor);
+        self::assertSame('/tmp/exports/run-source.zip', $seeded->pack?->zipPath);
+        self::assertSame('cid-1', $seeded->publishCid);
+        self::assertSame('web-1', $seeded->websiteId);
+        self::assertSame('ipns-1', $seeded->ipnsKey);
+        self::assertSame(1000, $this->scheduler->nextAt(ContentPublishScheduler::AUTO_HOOK), 'exactly one immediate tick is scheduled');
+
+        // The source run loses its terminal queue rows, and ONLY the source
+        // loses rows: the non-source terminal run and the live run keep
+        // theirs, and the seeded run starts from an empty slice of its own.
+        self::assertSame(0, $workItems->countByStatus('run-source', WorkItemStatus::Rewritten), 'the source run loses its queue rows');
+        self::assertSame(1, $workItems->countByStatus('run-older', WorkItemStatus::Queued), 'a non-source terminal run keeps its queue rows');
+        self::assertSame(1, $workItems->countByStatus('run-live', WorkItemStatus::Queued), 'a live run keeps its queue rows');
+        self::assertSame(0, $workItems->pendingCount($seeded->runId), 'the seeded run starts from an empty slice');
     }
 
     public function testManualDriftRunIsNotExplicitSoItWaitsForTheUser(): void

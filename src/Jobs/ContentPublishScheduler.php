@@ -183,7 +183,9 @@ final class ContentPublishScheduler
      * identifiers (CID/website/IPNS) are carried over so the status surface
      * keeps reporting the last published state while the replay is queued.
      * Exactly one immediate AUTO_HOOK tick is scheduled; no follow-up is armed
-     * (single active run, single-run-slot semantics).
+     * (single active run, single-run-slot semantics). The source run's
+     * terminal queue rows are purged once the seeded run is persisted — and
+     * only the source's rows, so no other run is touched.
      */
     public function publishExisting(ExportRun $source, ?int $at = null): PublishNowResult
     {
@@ -204,6 +206,13 @@ final class ContentPublishScheduler
             $seeded->recordPublishIdentifiers($source->publishCid, $source->websiteId, $source->ipnsKey, at: $now);
         }
         $this->repository->create($seeded);
+
+        // This path bypasses ensurePendingRun, whose terminal queue-row purge
+        // is the only other place prior runs' rows are removed: purge the
+        // source run's slice now that the seeded replay run is persisted. Only
+        // the source id is listed — the seeded run's own (empty) slice and
+        // every other run are never touched.
+        $this->workItems->purgeTerminalRuns([$source->runId]);
 
         $this->scheduleImmediately($now);
 
@@ -291,6 +300,18 @@ final class ContentPublishScheduler
             return;
         }
 
+        // Collect the ids of prior runs that will never be ticked again
+        // (terminal, or superseded on the way to cancellation) BEFORE the
+        // latest record is deleted, so the deleted run's queue rows are
+        // covered too. Live (nonterminal, not superseded) runs and the fresh
+        // run are never in this list.
+        $staleRunIds = [];
+        foreach ($this->repository->list() as $prior) {
+            if ($prior->isTerminal() || $prior->superseded) {
+                $staleRunIds[] = $prior->runId;
+            }
+        }
+
         if ($run !== null) {
             $this->repository->delete($run->runId);
         }
@@ -302,16 +323,19 @@ final class ContentPublishScheduler
         }
         $this->repository->create($pending);
 
-        // A NEW run id was just persisted, so the work-item queue is cleared
-        // here and only here: the next discovery refills it, and the prior
-        // (terminal, cancelled or failed) run's done/rewritten rows must not
-        // survive — insertCanonical is first-seen-wins and never re-queues a
-        // finished row, so a stale row would starve the fresh per-run work
-        // directory and pack would fail with "Work tree has no root
-        // index.html". Mid-run absorption (startNow on a queued NotStarted
-        // run, publishExisting replay, ticks and status reads) never reaches
-        // this branch and never clears.
-        $this->workItems->clear();
+        // The work-item queue is cleared here and only here, when a new run
+        // id is persisted: without the clear, first-seen-wins would starve
+        // the fresh per-run work directory with the stale rows the new id
+        // already carries, so the new run must start from a clean queue. The
+        // clear is scoped to the new run's slice.
+        $this->workItems->clear($pending->runId);
+
+        // Queue rows are run-scoped but persisted across completed runs: purge
+        // the prior terminal/superseded runs' rows now that the new run is
+        // persisted, so finished runs stop accumulating rows in the shared
+        // queue. The purge only touches the listed run ids — never the fresh
+        // run's slice and never a live nonterminal run.
+        $this->workItems->purgeTerminalRuns($staleRunIds);
     }
 
     /**

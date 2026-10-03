@@ -36,6 +36,7 @@ final class WorkItemQueueCollector implements QueueCollector
     public const UNLIMITED = PHP_INT_MAX;
 
     public function __construct(
+        private readonly string $runId,
         private readonly WorkItemRepository $repository,
         private readonly int $priority = 10,
         private readonly int $maxAssets = self::UNLIMITED,
@@ -78,14 +79,14 @@ final class WorkItemQueueCollector implements QueueCollector
             // duplicate reference to an already-known row is not a new
             // collection and must neither consume the cap nor raise the
             // warning; first-seen-wins already guarantees it is queued.
-            if ($this->repository->priorityOf($workItem->urlHash()) === null) {
+            if ($this->repository->priorityOf($this->runId, $workItem->urlHash()) === null) {
                 $this->capHit = true;
             }
 
             return;
         }
 
-        if ($this->repository->insertCanonical($workItem, $this->priority)->inserted()) {
+        if ($this->repository->insertCanonical($this->runId, $workItem, $this->priority)->inserted()) {
             ++$this->collected;
         }
     }

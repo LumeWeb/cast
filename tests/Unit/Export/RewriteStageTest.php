@@ -31,6 +31,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class RewriteStageTest extends TestCase
 {
+    private const RUN = 'run-1';
     private const ORIGIN = 'https://example.test/';
 
     private InMemoryWorkItemRepository $repo;
@@ -69,7 +70,7 @@ final class RewriteStageTest extends TestCase
 
     public function testRequiresSuccessfulProbeBeforeRewrite(): void
     {
-        $stage = $this->stage(new FakeRewriteEnvironment([]), new PipelineState());
+        $stage = $this->stage(new FakeRewriteEnvironment([]), $this->state());
 
         $result = $stage->execute('');
 
@@ -103,8 +104,8 @@ final class RewriteStageTest extends TestCase
 
         self::assertFalse($result->done);
         self::assertSame(1, $result->progress);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Rewritten));
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Done));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Rewritten));
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done));
         self::assertNull($this->state->rewrite);
     }
 
@@ -134,7 +135,7 @@ final class RewriteStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Rewritten));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Rewritten));
         self::assertArrayHasKey('about/index.html', $env->written);
         self::assertStringContainsString('./../wp-content/themes/x/logo.png', $env->written['about/index.html']);
     }
@@ -157,8 +158,8 @@ final class RewriteStageTest extends TestCase
         // stage still collects (pages being dropped) and finishes, leaving the
         // collected queue for a run that wires the reconciliation.
         $discovered = $this->factory->fromString('https://example.test/wp-content/themes/x/logo.png');
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Queued));
-        self::assertSame(1, $this->repo->priorityOf($discovered->urlHash()));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Queued));
+        self::assertSame(1, $this->repo->priorityOf(self::RUN, $discovered->urlHash()));
     }
 
     public function testBinaryAssetDoneItemPassesThroughUntouched(): void
@@ -170,8 +171,8 @@ final class RewriteStageTest extends TestCase
 
         self::assertTrue($result->done);
         self::assertNull($result->failure);
-        self::assertSame(0, $this->repo->countByStatus(WorkItemStatus::Rewritten));
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Done), 'binary stays done');
+        self::assertSame(0, $this->repo->countByStatus(self::RUN, WorkItemStatus::Rewritten));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done), 'binary stays done');
         self::assertSame([], $env->written, 'no body is read or rewritten');
     }
 
@@ -203,8 +204,8 @@ final class RewriteStageTest extends TestCase
         self::assertTrue($result->done);
         self::assertNull($result->failure);
         self::assertSame('', $result->cursor);
-        self::assertSame(2, $this->repo->countByStatus(WorkItemStatus::Rewritten));
-        self::assertSame(0, $this->repo->countByStatus(WorkItemStatus::Done));
+        self::assertSame(2, $this->repo->countByStatus(self::RUN, WorkItemStatus::Rewritten));
+        self::assertSame(0, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done));
     }
 
     public function testRewriteSummaryTalliesRewrittenAndPassedThrough(): void
@@ -251,14 +252,22 @@ final class RewriteStageTest extends TestCase
         self::assertStringContainsString('about/index.html', $result->failure);
         // The item was not consumed: a later tick (after the body exists) can
         // still rewrite it.
-        self::assertSame(1, $this->repo->countByStatus(WorkItemStatus::Done));
+        self::assertSame(1, $this->repo->countByStatus(self::RUN, WorkItemStatus::Done));
+    }
+
+    private function state(): PipelineState
+    {
+        $state = new PipelineState();
+        $state->runId = self::RUN;
+
+        return $state;
     }
 
     private function insertDone(string $url, int $priority = 10): WorkItem
     {
         $item = $this->factory->fromString($url);
-        $this->repo->insertCanonical($item, $priority);
-        $this->repo->transition($item->urlHash(), WorkItemStatus::Done);
+        $this->repo->insertCanonical(self::RUN, $item, $priority);
+        $this->repo->transition(self::RUN, $item->urlHash(), WorkItemStatus::Done);
 
         return $item;
     }
@@ -285,7 +294,7 @@ final class RewriteStageTest extends TestCase
 
     private function rewritableState(): PipelineState
     {
-        $state = new PipelineState();
+        $state = $this->state();
         $origin = Origin::fromUrl((new UrlCanonicalizer())->canonicalize(self::ORIGIN));
         $state->probe = new ProbeResult($origin, self::ORIGIN, 2048, 5);
         $state->setup = new SetupResult($this->workDir);

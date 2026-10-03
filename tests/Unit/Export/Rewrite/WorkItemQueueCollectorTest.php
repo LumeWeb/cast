@@ -15,6 +15,7 @@ use PHPUnit\Framework\TestCase;
 
 final class WorkItemQueueCollectorTest extends TestCase
 {
+    private const RUN = 'run-1';
     private InMemoryWorkItemRepository $repository;
     private WorkItemQueueCollector $collector;
     private WorkItemFactory $factory;
@@ -22,7 +23,7 @@ final class WorkItemQueueCollectorTest extends TestCase
     protected function setUp(): void
     {
         $this->repository = new InMemoryWorkItemRepository();
-        $this->collector = new WorkItemQueueCollector($this->repository);
+        $this->collector = new WorkItemQueueCollector('run-1', $this->repository);
         $this->factory = new WorkItemFactory();
     }
 
@@ -32,8 +33,21 @@ final class WorkItemQueueCollectorTest extends TestCase
 
         $this->collector->queue($item);
 
-        self::assertSame(1, $this->repository->countByStatus(WorkItemStatus::Queued));
-        self::assertSame(1, $this->repository->pendingCount());
+        self::assertSame(1, $this->repository->countByStatus('run-1', WorkItemStatus::Queued));
+        self::assertSame(1, $this->repository->pendingCount('run-1'));
+    }
+
+    public function testCollectorOnlySeesItsOwnRun(): void
+    {
+        // A row with the same canonical URL in ANOTHER run is a distinct row:
+        // it must not count as a duplicate for this collector's run.
+        $this->repository->insertCanonical('run-2', $this->factory->fromString('https://example.com/a.jpg?ver=1'));
+
+        $collector = new WorkItemQueueCollector('run-1', $this->repository);
+        $collector->queue($this->factory->fromString('https://example.com/a.jpg?ver=1'));
+
+        self::assertSame(1, $this->repository->countByStatus('run-1', WorkItemStatus::Queued), 'the collector queues into its own run');
+        self::assertSame(1, $this->repository->countByStatus('run-2', WorkItemStatus::Queued), 'the other run keeps its own row');
     }
 
     public function testQueueDeduplicatesSameCanonicalItem(): void
@@ -43,7 +57,7 @@ final class WorkItemQueueCollectorTest extends TestCase
         $this->collector->queue($item);
         $this->collector->queue($this->factory->fromString('https://example.com/a.jpg?ver=2'));
 
-        self::assertSame(1, $this->repository->pendingCount());
+        self::assertSame(1, $this->repository->pendingCount(self::RUN));
     }
 
     public function testQueuePreservesOutputPath(): void
@@ -59,13 +73,13 @@ final class WorkItemQueueCollectorTest extends TestCase
     public function testQueueHonoursConfiguredPriority(): void
     {
         $item = $this->factory->fromString('https://example.com/wp-content/themes/x/logo.png');
-        $collector = new WorkItemQueueCollector($this->repository, 1);
+        $collector = new WorkItemQueueCollector('run-1', $this->repository, 1);
 
         $collector->queue($item);
 
         self::assertSame(
             1,
-            $this->repository->priorityOf($item->urlHash()),
+            $this->repository->priorityOf(self::RUN, $item->urlHash()),
             'the queue collector inserts with the configured urgent priority',
         );
     }
@@ -80,9 +94,9 @@ final class WorkItemQueueCollectorTest extends TestCase
 
         $this->collector->queue($item);
 
-        self::assertSame(0, $this->repository->countByStatus(WorkItemStatus::Queued));
-        self::assertSame(0, $this->repository->pendingCount());
-        self::assertNull($this->repository->priorityOf($item->urlHash()), 'a dropped page has no row at all');
+        self::assertSame(0, $this->repository->countByStatus(self::RUN, WorkItemStatus::Queued));
+        self::assertSame(0, $this->repository->pendingCount(self::RUN));
+        self::assertNull($this->repository->priorityOf(self::RUN, $item->urlHash()), 'a dropped page has no row at all');
         self::assertSame(0, $this->collector->collectedCount());
     }
 
@@ -93,30 +107,30 @@ final class WorkItemQueueCollectorTest extends TestCase
 
         $this->collector->queue($item);
 
-        self::assertSame(1, $this->repository->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(1, $this->repository->countByStatus(self::RUN, WorkItemStatus::Queued));
         self::assertSame(1, $this->collector->collectedCount());
     }
 
     public function testCapRefusesNewAssetsAndRaisesCapHit(): void
     {
-        $collector = new WorkItemQueueCollector($this->repository, 1, maxAssets: 2);
+        $collector = new WorkItemQueueCollector('run-1', $this->repository, 1, maxAssets: 2);
         $collector->queue($this->factory->fromString('https://example.com/wp-content/a.png'));
         $collector->queue($this->factory->fromString('https://example.com/wp-content/b.png'));
         $collector->queue($this->factory->fromString('https://example.com/wp-content/c.png'));
 
-        self::assertSame(2, $this->repository->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(2, $this->repository->countByStatus(self::RUN, WorkItemStatus::Queued));
         self::assertSame(2, $collector->collectedCount());
         self::assertTrue($collector->capHit());
     }
 
     public function testCapDoesNotWarnOnDuplicateOfAnAlreadyCollectedAsset(): void
     {
-        $collector = new WorkItemQueueCollector($this->repository, 1, maxAssets: 1);
+        $collector = new WorkItemQueueCollector('run-1', $this->repository, 1, maxAssets: 1);
         $ref = $this->factory->fromString('https://example.com/wp-content/a.png');
         $collector->queue($ref);
         $collector->queue($ref);
 
-        self::assertSame(1, $this->repository->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(1, $this->repository->countByStatus(self::RUN, WorkItemStatus::Queued));
         self::assertFalse($collector->capHit(), 'a duplicate reference is not a refused new collection');
     }
 
@@ -137,14 +151,14 @@ final class WorkItemQueueCollectorTest extends TestCase
 
         $this->collector->queue($item);
 
-        self::assertSame(0, $this->repository->countByStatus(WorkItemStatus::Queued));
-        self::assertNull($this->repository->priorityOf($item->urlHash()), 'a glob asset has no row at all');
+        self::assertSame(0, $this->repository->countByStatus(self::RUN, WorkItemStatus::Queued));
+        self::assertNull($this->repository->priorityOf(self::RUN, $item->urlHash()), 'a glob asset has no row at all');
         self::assertSame(0, $this->collector->collectedCount());
 
         // A percent-encoded `%2A` is one real escape, not a glob: it stays
         // collectable so legitimately-encoded assets are not lost.
         $encoded = $this->factory->fromString('https://example.com/wp-content/%2A-logo.png');
         $this->collector->queue($encoded);
-        self::assertSame(1, $this->repository->countByStatus(WorkItemStatus::Queued));
+        self::assertSame(1, $this->repository->countByStatus(self::RUN, WorkItemStatus::Queued));
     }
 }

@@ -1055,6 +1055,23 @@ $GLOBALS['wpdb'] = new class {
             return $this->insertRow($row);
         }
 
+        if (str_starts_with(strtoupper(ltrim($query)), 'DELETE')) {
+            // The repository's clear(runId) empties one run's slice of the
+            // shared queue; other runs' rows are untouched.
+            if (preg_match("/DELETE FROM \S+ WHERE run_id = '([^']+)'/", $query, $match) === 1) {
+                $kept = array_filter(
+                    $this->rows(),
+                    static fn (array $row): bool => ($row['run_id'] ?? null) !== $match[1],
+                );
+                $deleted = count($this->rows()) - count($kept);
+                $this->setRows(array_values($kept));
+
+                return $deleted;
+            }
+
+            return 0;
+        }
+
         if (str_starts_with(strtoupper(ltrim($query)), 'UPDATE')) {
             return $this->applyUpdate($query);
         }
@@ -1067,7 +1084,7 @@ $GLOBALS['wpdb'] = new class {
         $GLOBALS['lumeweb_cast_wpdb_queries'][] = $query;
 
         if (str_contains($query, 'SELECT url_hash FROM')) {
-            return $this->nextQueuedHash($query);
+            return $this->nextClaimableHash($query);
         }
 
         if (str_contains($query, 'SELECT priority FROM')) {
@@ -1096,11 +1113,12 @@ $GLOBALS['wpdb'] = new class {
     {
         $GLOBALS['lumeweb_cast_wpdb_queries'][] = $query;
 
-        // The rewrite stage's first-rewritable peek (`WHERE status = %s AND
-        // (kind IN ... OR kind = %s AND ... path`) has no url_hash guard, so
-        // resolve it PHP-side like the claim select, lowest priority first.
-        $row = str_contains($query, 'WHERE status = ')
-            ? $this->firstRewritableRow()
+        // The rewrite stage's first-rewritable peek (`WHERE run_id = %s AND
+        // status = %s AND (kind IN ... OR kind = %s AND ... path`) has no
+        // url_hash guard, so resolve it PHP-side like the claim select,
+        // scoped to the run, lowest priority first.
+        $row = str_contains($query, 'kind IN')
+            ? $this->firstRewritableRow($query)
             : $this->rowByHashForQuery($query);
         if ($row === null) {
             return null;
@@ -1126,10 +1144,19 @@ $GLOBALS['wpdb'] = new class {
      *
      * @return array<string, mixed>|null
      */
-    private function firstRewritableRow(): ?array
+    private function firstRewritableRow(string $query): ?array
     {
+        // The rewritable peek is run-scoped: WHERE run_id = 'R' AND status = 'done'...
+        $runId = null;
+        if (preg_match("/WHERE run_id = '([^']+)'/", $query, $runMatch) === 1) {
+            $runId = $runMatch[1];
+        }
+
         $candidates = [];
         foreach ($this->rows() as $row) {
+            if ($runId !== null && ($row['run_id'] ?? null) !== $runId) {
+                continue;
+            }
             if (($row['status'] ?? null) !== 'done') {
                 continue;
             }
@@ -1193,7 +1220,7 @@ $GLOBALS['wpdb'] = new class {
             return null;
         }
 
-        $columns = ['url_hash', 'url', 'identity', 'path', 'kind', 'priority', 'status', 'fetch_attempts', 'retry_at'];
+        $columns = ['run_id', 'url_hash', 'url', 'identity', 'path', 'kind', 'priority', 'status', 'fetch_attempts', 'retry_at', 'worker_token', 'lease_expires_at'];
         $values = $this->splitSqlValues($match[1]);
         if (count($values) !== count($columns)) {
             return null;
@@ -1202,7 +1229,7 @@ $GLOBALS['wpdb'] = new class {
         $row = [];
         foreach ($columns as $position => $column) {
             $value = $this->unquote($values[$position]);
-            $row[$column] = $column === 'priority' || $column === 'fetch_attempts' || $column === 'retry_at'
+            $row[$column] = in_array($column, ['priority', 'fetch_attempts', 'retry_at', 'lease_expires_at'], true)
                 ? (int) $value
                 : $value;
         }
@@ -1269,7 +1296,12 @@ $GLOBALS['wpdb'] = new class {
     {
         $rows = $this->rows();
         foreach ($rows as $existing) {
-            if (($existing['url_hash'] ?? null) === ($row['url_hash'] ?? null)) {
+            // The unique key is (run_id, url_hash): a duplicate is the same
+            // URL in the SAME run; the same URL in another run is a new row.
+            if (
+                ($existing['run_id'] ?? null) === ($row['run_id'] ?? null)
+                && ($existing['url_hash'] ?? null) === ($row['url_hash'] ?? null)
+            ) {
                 return 0;
             }
         }
@@ -1282,43 +1314,59 @@ $GLOBALS['wpdb'] = new class {
 
     private function applyUpdate(string $query): int
     {
-        // Atomic conditional claim: only a row still queued becomes processing
-        // and its attempt count advances exactly once.
+        // Atomic conditional lease claim: only a row still queued (retry due)
+        // or in flight on an EXPIRED lease becomes (re-)claimed; the claiming
+        // worker token and the lease expiry are recorded and the attempt count
+        // advances exactly once. A live lease is never stolen.
         if (str_contains($query, 'fetch_attempts = fetch_attempts + 1')) {
-            return $this->claimByHash($this->hashFromWhere($query));
+            [$runId, $hash] = $this->runAndHashFromWhere($query);
+
+            return $this->claimByHash($query, $runId, $hash);
         }
 
-        if (preg_match("/SET status = '([^']+)', retry_at = (\d+) WHERE url_hash = '([^']+)'/", $query, $match) === 1) {
-            return $this->mutateRow($match[3], ['status' => $match[1], 'retry_at' => (int) $match[2]]);
+        if (preg_match("/SET status = '([^']+)', retry_at = `?(\d+)`?, worker_token = '', lease_expires_at = `?0`?\s+WHERE run_id = '([^']*)' AND url_hash = '([^']*)'/", $query, $match) === 1) {
+            return $this->mutateRow($match[3], $match[4], ['status' => $match[1], 'retry_at' => (int) $match[2], 'worker_token' => '', 'lease_expires_at' => 0]);
         }
 
-        if (preg_match("/SET priority = (\d+) WHERE url_hash = '([^']+)'/", $query, $match) === 1) {
-            return $this->mutateRow($match[2], ['priority' => (int) $match[1]]);
+        if (preg_match("/SET priority = `?(\d+)`?\s+WHERE run_id = '([^']*)' AND url_hash = '([^']*)'/", $query, $match) === 1) {
+            return $this->mutateRow($match[2], $match[3], ['priority' => (int) $match[1]]);
         }
 
-        if (preg_match("/SET status = '([^']+)' WHERE url_hash = '([^']+)'/", $query, $match) === 1) {
-            return $this->mutateRow($match[2], ['status' => $match[1]]);
+        if (preg_match("/SET status = '([^']+)', worker_token = '', lease_expires_at = `?0`?\s+WHERE run_id = '([^']*)' AND url_hash = '([^']*)'/", $query, $match) === 1) {
+            return $this->mutateRow($match[2], $match[3], ['status' => $match[1], 'worker_token' => '', 'lease_expires_at' => 0]);
         }
 
         return 0;
     }
 
-    private function claimByHash(?string $hash): int
+    private function claimByHash(string $query, ?string $runId, ?string $hash): int
     {
-        if ($hash === null) {
+        if ($hash === null || $runId === null) {
             return 0;
         }
 
+        preg_match("/worker_token = '(.*?)',/", $query, $workerMatch);
+        preg_match('/lease_expires_at = `?(\d+)`?,/', $query, $leaseMatch);
+        preg_match('/retry_at <= `?(\d+)`?/', $query, $nowMatch);
+        $worker = $workerMatch[1] ?? '';
+        $leaseExpiresAt = $leaseMatch[1] ?? 0;
+        $now = $nowMatch[1] ?? PHP_INT_MAX;
+
         $rows = $this->rows();
         foreach ($rows as $index => $row) {
-            if (($row['url_hash'] ?? null) !== $hash) {
+            if (($row['run_id'] ?? null) !== $runId || ($row['url_hash'] ?? null) !== $hash) {
                 continue;
             }
-            if (($row['status'] ?? null) !== 'queued') {
+            $status = (string) ($row['status'] ?? '');
+            $claimable = $status === 'queued' && (int) ($row['retry_at'] ?? 0) <= $now
+                || $status === 'processing' && (int) ($row['lease_expires_at'] ?? 0) > 0 && (int) ($row['lease_expires_at'] ?? 0) <= $now;
+            if (!$claimable) {
                 return 0;
             }
 
             $rows[$index]['status'] = 'processing';
+            $rows[$index]['worker_token'] = $worker;
+            $rows[$index]['lease_expires_at'] = $leaseExpiresAt;
             $rows[$index]['fetch_attempts'] = (int) ($rows[$index]['fetch_attempts'] ?? 0) + 1;
             $this->setRows($rows);
 
@@ -1331,11 +1379,11 @@ $GLOBALS['wpdb'] = new class {
     /**
      * @param array<string, mixed> $changes
      */
-    private function mutateRow(string $hash, array $changes): int
+    private function mutateRow(string $runId, string $hash, array $changes): int
     {
         $rows = $this->rows();
         foreach ($rows as $index => $row) {
-            if (($row['url_hash'] ?? null) !== $hash) {
+            if (($row['run_id'] ?? null) !== $runId || ($row['url_hash'] ?? null) !== $hash) {
                 continue;
             }
 
@@ -1350,13 +1398,16 @@ $GLOBALS['wpdb'] = new class {
         return 0;
     }
 
-    private function hashFromWhere(string $query): ?string
+    /**
+     * @return array{0: string|null, 1: string|null}
+     */
+    private function runAndHashFromWhere(string $query): array
     {
-        if (preg_match("/WHERE url_hash = '([^']+)'/", $query, $match) !== 1) {
-            return null;
+        if (preg_match("/WHERE run_id = '([^']*)' AND url_hash = '([^']*)'/", $query, $match) === 1) {
+            return [$match[1], $match[2]];
         }
 
-        return $match[1];
+        return [null, null];
     }
 
     /**
@@ -1364,13 +1415,13 @@ $GLOBALS['wpdb'] = new class {
      */
     private function rowByHashForQuery(string $query): ?array
     {
-        $hash = $this->hashFromWhere($query);
-        if ($hash === null) {
+        [$runId, $hash] = $this->runAndHashFromWhere($query);
+        if ($hash === null || $runId === null) {
             return null;
         }
 
         foreach ($this->rows() as $row) {
-            if (($row['url_hash'] ?? null) === $hash) {
+            if (($row['run_id'] ?? null) === $runId && ($row['url_hash'] ?? null) === $hash) {
                 return $row;
             }
         }
@@ -1378,15 +1429,26 @@ $GLOBALS['wpdb'] = new class {
         return null;
     }
 
-    private function nextQueuedHash(string $query): ?string
+    private function nextClaimableHash(string $query): ?string
     {
-        preg_match('/retry_at <= (\d+)/', $query, $match);
+        if (preg_match("/WHERE run_id = '([^']+)'/", $query, $runMatch) !== 1) {
+            return null;
+        }
+        $runId = $runMatch[1];
+
+        preg_match('/retry_at <= `?(\d+)`?/', $query, $match);
         $now = isset($match[1]) ? (int) $match[1] : PHP_INT_MAX;
 
         $best = null;
         $bestPriority = null;
         foreach ($this->rows() as $row) {
-            if (($row['status'] ?? null) !== 'queued' || (int) ($row['retry_at'] ?? 0) > $now) {
+            if (($row['run_id'] ?? null) !== $runId) {
+                continue;
+            }
+            $status = (string) ($row['status'] ?? '');
+            $claimable = $status === 'queued' && (int) ($row['retry_at'] ?? 0) <= $now
+                || $status === 'processing' && (int) ($row['lease_expires_at'] ?? 0) > 0 && (int) ($row['lease_expires_at'] ?? 0) <= $now;
+            if (!$claimable) {
                 continue;
             }
 
@@ -1402,9 +1464,17 @@ $GLOBALS['wpdb'] = new class {
 
     private function countRows(string $query): int
     {
+        if (preg_match("/WHERE run_id = '([^']+)'/", $query, $runMatch) !== 1) {
+            return 0;
+        }
+        $runId = $runMatch[1];
+
         $count = 0;
         $pending = str_contains($query, 'status IN ');
         foreach ($this->rows() as $row) {
+            if (($row['run_id'] ?? null) !== $runId) {
+                continue;
+            }
             $status = (string) ($row['status'] ?? '');
             if ($pending) {
                 if ($status === 'queued' || $status === 'processing') {
@@ -1413,7 +1483,7 @@ $GLOBALS['wpdb'] = new class {
                 continue;
             }
 
-            if (preg_match("/WHERE status = '([^']+)'/", $query, $match) === 1 && $status === $match[1]) {
+            if (preg_match("/WHERE run_id = '[^']+' AND status = '([^']+)'/", $query, $match) === 1 && $status === $match[1]) {
                 ++$count;
             }
         }

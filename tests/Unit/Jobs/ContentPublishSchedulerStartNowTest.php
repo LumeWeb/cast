@@ -168,7 +168,11 @@ final class ContentPublishSchedulerStartNowTest extends TestCase
         $failed->start(at: 800);
         $failed->fail('connection lost', at: 900);
         $this->repository->save($failed);
-        $workItems->insertCanonical((new WorkItemFactory())->fromString('https://example.com/stale/'));
+        // The explicit rerun becomes a brand-new run id (deterministic here:
+        // run-1000-1). Seed that NEW run's queue slice with a stale row so the
+        // test observes the creation clearing it: the rerun's discovery starts
+        // from a clean per-run queue.
+        $workItems->insertCanonical('run-1000-1', (new WorkItemFactory())->fromString('https://example.com/stale/'));
 
         $service = new ContentPublishScheduler(
             clock: $this->clock,
@@ -181,10 +185,12 @@ final class ContentPublishSchedulerStartNowTest extends TestCase
         $result = $service->startNow(at: 1000);
 
         self::assertTrue($result->started);
-        self::assertNotSame('run-failed', $result->runId);
-        self::assertSame(0, $workItems->pendingCount(), 'a rerun starts from a clean queue');
+        self::assertNotNull($result->runId);
+        $rerunId = $result->runId;
+        self::assertNotSame('run-failed', $rerunId);
+        self::assertSame(0, $workItems->pendingCount($rerunId), 'a rerun starts from a clean queue');
         self::assertTrue(
-            $workItems->insertCanonical((new WorkItemFactory())->fromString('https://example.com/stale/'))->inserted(),
+            $workItems->insertCanonical($rerunId, (new WorkItemFactory())->fromString('https://example.com/stale/'))->inserted(),
             'the rerun can re-queue every URL it must re-capture',
         );
     }

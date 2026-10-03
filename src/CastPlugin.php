@@ -252,6 +252,14 @@ final class CastPlugin
             CastExportItemsTable::name(self::tablePrefix()),
         );
 
+        // Resolve the latest run lazily at read time: a status poll after a
+        // new run starts must read the new run's queue, not the prior one's.
+        $runIdResolver = function () use ($repository): string {
+            $run = $repository->latest();
+
+            return $run === null ? '' : $run->runId;
+        };
+
         // The publish boundary's guard: resolve the portal deployment identity
         // once at boot. A complete identity (PORTAL_API_URL + PORTAL_API_KEY)
         // lets the composition build the real publish stack; an incomplete one
@@ -567,7 +575,7 @@ final class CastPlugin
             // discovery/capture/rewrite stages drive, read through the shared
             // validation-check state provider. Lets the status report advance
             // "Captured X of M URLs" while capture/rewrite are still running.
-            workItems: new RepositoryWorkItemStateProvider($items),
+            workItems: new RepositoryWorkItemStateProvider($items, $runIdResolver),
             // The awaiting-website registry-first adapters: the shared account
             // website registry (the adapter over the raw SDK client, so the
             // guided card can both list and create), the publish registry for

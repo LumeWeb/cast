@@ -404,7 +404,7 @@ final class DiscoverStage implements PipelineStage
             return 0;
         }
 
-        $outcome = $this->repository->insertCanonical($this->normalizer->workItem($url));
+        $outcome = $this->repository->insertCanonical($this->state->runId, $this->normalizer->workItem($url));
 
         return $outcome->inserted() ? 1 : 0;
     }
@@ -417,7 +417,7 @@ final class DiscoverStage implements PipelineStage
      */
     private function capReached(): bool
     {
-        return $this->repository->countByStatus(WorkItemStatus::Queued) >= $this->maxItems;
+        return $this->repository->countByStatus($this->state->runId, WorkItemStatus::Queued) >= $this->maxItems;
     }
 
     private function capDone(int $progress): StageResult
@@ -432,7 +432,7 @@ final class DiscoverStage implements PipelineStage
     private function finish(int $progress): void
     {
         $this->state->discover = new DiscoverResult(
-            $this->repository->countByStatus(WorkItemStatus::Queued),
+            $this->repository->countByStatus($this->state->runId, WorkItemStatus::Queued),
         );
     }
 

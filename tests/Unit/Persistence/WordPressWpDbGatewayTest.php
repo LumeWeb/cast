@@ -56,7 +56,7 @@ final class WordPressWpDbGatewayTest extends TestCase
             [['UPDATE t SET status = %s WHERE url_hash = %s AND retry_at <= %d', ['done', 'abc', 5]]],
             $this->db->prepared,
         );
-        self::assertSame(['PREPARED(1)'], $this->db->queries);
+        self::assertSame(["UPDATE t SET status = 'done' WHERE url_hash = 'abc' AND retry_at <= 5"], $this->db->queries);
     }
 
     public function testQueryNormalisesWpdbFalseToZero(): void
@@ -83,7 +83,7 @@ final class WordPressWpDbGatewayTest extends TestCase
         self::assertSame(7, $this->gateway->getVar('SELECT priority FROM t WHERE url_hash = %s', ['abc']));
 
         self::assertSame([['SELECT priority FROM t WHERE url_hash = %s', ['abc']]], $this->db->prepared);
-        self::assertSame(['PREPARED(1)'], $this->db->queries);
+        self::assertSame(["SELECT priority FROM t WHERE url_hash = 'abc'"], $this->db->queries);
     }
 
     public function testGetVarReturnsNullWhenNoRow(): void

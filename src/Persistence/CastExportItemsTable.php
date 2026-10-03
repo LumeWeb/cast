@@ -19,6 +19,30 @@ final class CastExportItemsTable
     public const NAME = 'cast_export_items';
 
     /**
+     * The run-scoped unique key name. The same URL may exist in two runs at
+     * once (first-seen-wins is a per-run guarantee), so the key covers
+     * (run_id, url_hash), not url_hash alone.
+     */
+    public const RUN_SCOPE_KEY = 'run_url_hash';
+
+    /**
+     * The legacy (pre run-scoping) unique key name, kept so the migration
+     * step can recognise and swap an existing unscoped table.
+     */
+    public const LEGACY_UNIQUE_KEY = 'url_hash';
+
+    /**
+     * The ALTER that swaps the legacy url_hash-only unique key for
+     * (run_id, url_hash) on tables predating run scoping. dbDelta cannot
+     * replace an existing key, so this explicit statement has to do it.
+     */
+    public static function runScopeKeySql(string $table): string
+    {
+        return 'ALTER TABLE ' . $table . ' DROP KEY ' . self::LEGACY_UNIQUE_KEY
+            . ', ADD UNIQUE KEY ' . self::RUN_SCOPE_KEY . ' (run_id, url_hash)';
+    }
+
+    /**
      * The fully-prefixed table name, e.g. `wptests_cast_export_items`.
      */
     public static function name(string $prefix): string
@@ -40,6 +64,7 @@ final class CastExportItemsTable
 
         return "CREATE TABLE {$table} (\n"
             . "    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,\n"
+            . "    run_id VARCHAR(64) NOT NULL,\n"
             . "    url_hash CHAR(32) NOT NULL,\n"
             . "    url TEXT NOT NULL,\n"
             . "    identity TEXT NOT NULL,\n"
@@ -49,8 +74,10 @@ final class CastExportItemsTable
             . "    status VARCHAR(20) NOT NULL DEFAULT 'queued',\n"
             . "    fetch_attempts TINYINT NOT NULL DEFAULT 0,\n"
             . "    retry_at BIGINT NOT NULL DEFAULT 0,\n"
+            . "    worker_token VARCHAR(64) NOT NULL DEFAULT '',\n"
+            . "    lease_expires_at BIGINT NOT NULL DEFAULT 0,\n"
             . "    PRIMARY KEY  (id),\n"
-            . "    UNIQUE KEY url_hash (url_hash)\n"
+            . "    UNIQUE KEY run_url_hash (run_id, url_hash)\n"
             . "){$collate};";
     }
 

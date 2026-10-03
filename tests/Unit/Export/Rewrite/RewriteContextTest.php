@@ -17,7 +17,7 @@ final class RewriteContextTest extends TestCase
     {
         $document = new Url('https', 'example.com', null, '/wp-content/themes/x/style.css', '');
         $origin = Origin::fromUrl($document);
-        $queue = new WorkItemQueueCollector(new InMemoryWorkItemRepository());
+        $queue = new WorkItemQueueCollector('run-1', new InMemoryWorkItemRepository());
 
         $context = new RewriteContext($document, $origin, $queue);
 
